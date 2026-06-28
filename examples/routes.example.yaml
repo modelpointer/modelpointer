@@ -57,11 +57,6 @@ upstreams:
         openai:
           base_url: "https://my-resource.openai.azure.com/openai/deployments/gpt-4o"
 
-  # Cohere — native API only (no regions needed)
-  cohere:
-    provider_type: cohere
-    api_key: "${COHERE_API_KEY}"
-
   # Self-hosted / local model (e.g. vLLM, Ollama)
   local:
     regions:
@@ -188,21 +183,3 @@ routes:
           region: default
           weight: 100
 
-  # ── Native (provider-specific) route — rerank ─────────────────────────────────
-  #
-  # Use `native` for APIs that don't follow the OpenAI or Anthropic protocol,
-  # such as rerank, text-to-speech, image generation, or video generation.
-  # Specify `provider` for api_key lookup and the full endpoint `url`.
-  - model: "gte-rerank"
-    native:
-      upstreams:
-        - provider: aliyun
-          url: "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
-          weight: 100
-
-  - model: "rerank-english-v3.0"
-    native:
-      upstreams:
-        - provider: cohere
-          url: "https://api.cohere.com/v2/rerank"
-          weight: 100

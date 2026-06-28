@@ -47,22 +47,6 @@
 //!             region: default
 //!             weight: 1
 //! ```
-//!
-//! ## Native (provider-specific) routes
-//! ```yaml
-//! upstreams:
-//!   aliyun:
-//!     provider_type: aliyun
-//!     api_key: "${DASHSCOPE_API_KEY}"
-//!
-//! routes:
-//!   - model: "gte-rerank"
-//!     native:
-//!       upstreams:
-//!         - provider: aliyun
-//!           url: "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
-//!           weight: 1
-//! ```
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use std::sync::atomic::AtomicBool;
