@@ -1,0 +1,13 @@
+/target
+
+# Database files created during local testing
+*.db
+*.db-shm
+*.db-wal
+
+# Auth key config — contains sensitive key hashes, never commit
+auth.yaml
+**/auth.yaml
+
+# User-local route overrides (examples/ is tracked; routes.yaml is not)
+routes.yaml

@@ -1,0 +1,208 @@
+# modelpointer route config template
+#
+# Usage:
+#   modelpointer serve --route-file routes.yaml
+#
+# Tip: replace api_key values with ${ENV_VAR_NAME} references so you don't
+# store secrets in this file. modelpointer expands ${VAR} at startup.
+
+# ── Upstreams ─────────────────────────────────────────────────────────────────
+#
+# Each top-level key is a provider name. Under it, set:
+#   provider_type  (optional) vendor identifier for provider-specific dispatch
+#   api_key        (optional) shared credential for all regions
+#   regions        (optional) map of region name → protocol endpoints
+#
+# Providers used only for native (provider-specific) routes don't need `regions`.
+# Each region can expose an OpenAI-compatible endpoint, an Anthropic-compatible
+# endpoint, or both (for providers like Alibaba Cloud DashScope).
+
+upstreams:
+
+  # OpenAI
+  openai:
+    provider_type: openai
+    api_key: "${OPENAI_API_KEY}"
+    regions:
+      default:
+        openai:
+          base_url: "https://api.openai.com/v1"
+
+  # Anthropic (native API)
+  anthropic:
+    provider_type: anthropic
+    api_key: "${ANTHROPIC_API_KEY}"
+    regions:
+      default:
+        anthropic:
+          base_url: "https://api.anthropic.com"
+
+  # Alibaba Cloud DashScope — supports OpenAI/Anthropic protocols and native APIs
+  aliyun:
+    provider_type: aliyun
+    api_key: "${DASHSCOPE_API_KEY}"
+    regions:
+      default:
+        openai:
+          base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        anthropic:
+          base_url: "https://dashscope.aliyuncs.com/apps/anthropic/v1"
+
+  # Azure OpenAI — per-deployment base URL
+  azure:
+    provider_type: openai
+    api_key: "${AZURE_OPENAI_API_KEY}"
+    regions:
+      eastus:
+        openai:
+          base_url: "https://my-resource.openai.azure.com/openai/deployments/gpt-4o"
+
+  # Cohere — native API only (no regions needed)
+  cohere:
+    provider_type: cohere
+    api_key: "${COHERE_API_KEY}"
+
+  # Self-hosted / local model (e.g. vLLM, Ollama)
+  local:
+    regions:
+      default:
+        openai:
+          base_url: "http://localhost:8000/v1"
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+#
+# Each route maps a model name (as seen by the client) to one or more upstreams.
+# The model name can be any string; use `aliases` for alternate names clients
+# may send.
+#
+# Upstream references in openai/anthropic sections use:
+#   provider   the provider name from the upstreams block
+#   region     the region name within that provider
+#
+# Upstream references in native sections use:
+#   provider   the provider name (for api_key lookup)
+#   url        the full endpoint URL for this specific API
+#
+# Per-model rate limits (applied across all API keys):
+#   model_rpm   max requests/min for this model
+#   model_tpm   max tokens/min for this model
+#
+# Per-(api_key, model) rate limits:
+#   key_rpm     max requests/min per API key
+#   key_tpm     max tokens/min per API key
+#
+# These can also be overridden per key in quota.yaml (--quota-file).
+
+routes:
+
+  # ── Simple single-upstream route ─────────────────────────────────────────────
+  - model: "gpt-4o"
+    key_rpm: 500
+    key_tpm: 200000
+    model_rpm: 5000
+    openai:
+      upstreams:
+        - provider: openai
+          region: default
+          weight: 100
+
+  # ── Weighted load balancing across multiple upstreams ─────────────────────────
+  - model: "gpt-4o-balanced"
+    openai:
+      strategy: swrr          # smooth weighted round-robin (default)
+      upstreams:
+        - provider: openai
+          region: default
+          weight: 70
+        - provider: azure
+          region: eastus
+          weight: 30
+
+  # ── Primary / fallback tiers ──────────────────────────────────────────────────
+  #
+  # primary.capacity_rpm / primary.capacity_tpm define a spill threshold:
+  # once the primary tier is saturated, traffic overflows to the fallback tier
+  # transparently — the client never sees a 429.
+  - model: "claude-3-5-sonnet"
+    key_rpm: 200
+    anthropic:
+      primary:
+        capacity_rpm: 1000        # spill to fallback above 1000 req/min
+        capacity_tpm: 400000      # spill to fallback above 400k tokens/min
+        strategy: swrr
+        upstreams:
+          - provider: anthropic
+            region: default
+            weight: 100
+      fallback:
+        strategy: swrr
+        upstreams:
+          - provider: aliyun
+            region: default
+            weight: 100
+
+  # ── Model name rewriting ──────────────────────────────────────────────────────
+  #
+  # Use `upstream_model` to translate the client-facing model name to the name
+  # expected by the upstream provider.
+  - model: "my-gpt4o"
+    openai:
+      upstreams:
+        - provider: openai
+          region: default
+          weight: 100
+          upstream_model: "gpt-4o-2024-11-20"   # actual model name sent upstream
+
+  # ── Aliases ───────────────────────────────────────────────────────────────────
+  #
+  # Clients that send any of the alias names are routed here as well.
+  - model: "qwen3-plus"
+    aliases:
+      - "qwen-plus"
+      - "qwen3.5-plus"
+    openai:
+      upstreams:
+        - provider: aliyun
+          region: default
+          weight: 100
+    anthropic:
+      upstreams:
+        - provider: aliyun
+          region: default
+          weight: 100
+
+  # ── Embedding model ───────────────────────────────────────────────────────────
+  - model: "text-embedding-3-small"
+    openai:
+      upstreams:
+        - provider: openai
+          region: default
+          weight: 100
+
+  # ── Local / self-hosted model ─────────────────────────────────────────────────
+  - model: "llama-3.1-8b"
+    openai:
+      upstreams:
+        - provider: local
+          region: default
+          weight: 100
+
+  # ── Native (provider-specific) route — rerank ─────────────────────────────────
+  #
+  # Use `native` for APIs that don't follow the OpenAI or Anthropic protocol,
+  # such as rerank, text-to-speech, image generation, or video generation.
+  # Specify `provider` for api_key lookup and the full endpoint `url`.
+  - model: "gte-rerank"
+    native:
+      upstreams:
+        - provider: aliyun
+          url: "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+          weight: 100
+
+  - model: "rerank-english-v3.0"
+    native:
+      upstreams:
+        - provider: cohere
+          url: "https://api.cohere.com/v2/rerank"
+          weight: 100

@@ -1,0 +1,38 @@
+# modelpointer quota override config template
+#
+# Usage:
+#   modelpointer serve --quota-file quota.yaml
+#
+# Per-(api_key, model) rate limit overrides. When an entry matches the
+# (api_key_id, model) of an incoming request, its limits take precedence
+# over the model-level defaults defined in routes.yaml.
+#
+# Fields:
+#   api_key_id  the `id` field from auth.yaml
+#   model_id    the model name as defined in routes.yaml
+#   key_rpm     override requests/min for this (key, model) pair
+#   key_tpm     override tokens/min for this (key, model) pair
+#
+# Omitted fields fall back to the model-level defaults.
+# The gateway watches this file and hot-reloads it on changes.
+
+api_key_quotas:
+
+  # Give a trusted internal service a much higher quota on gpt-4o
+  - api_key_id: "00000000-0000-0000-0000-000000000001"
+    model_id: "gpt-4o"
+    key_rpm: 2000
+    key_tpm: 1000000
+
+  # Restrict a low-priority key on an expensive model
+  - api_key_id: "00000000-0000-0000-0000-000000000002"
+    model_id: "claude-3-5-sonnet"
+    key_rpm: 10
+    key_tpm: 20000
+
+  # Override only RPM; TPM falls back to the model default
+  - api_key_id: "00000000-0000-0000-0000-000000000003"
+    model_id: "qwen3-plus"
+    key_rpm: 500
+
+# user_quotas: reserved for a future release

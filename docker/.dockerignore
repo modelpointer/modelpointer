@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+
+# Local config files — mount these at runtime, never bake into image
+routes.yaml
+auth.yaml
+*.db
+*.db-shm
+*.db-wal

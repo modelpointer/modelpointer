@@ -1,0 +1,29 @@
+# modelpointer auth config template
+#
+# Usage:
+#   modelpointer serve --auth-file auth.yaml
+#
+# Generate a new key:
+#   modelpointer key generate --name "my-app" --append auth.yaml
+#
+# Disable a key (preserves the entry for audit purposes):
+#   modelpointer key disable <key-id> auth.yaml
+#
+# Re-enable a key:
+#   modelpointer key enable <key-id> auth.yaml
+#
+# List all keys:
+#   modelpointer key list auth.yaml
+#
+# Keep this file secret — do not commit to git.
+# The gateway watches this file and hot-reloads it on changes.
+
+mode: api_key
+
+keys:
+  - id: "00000000-0000-0000-0000-000000000001"
+    name: "example-key"
+    # SHA-256 hash of the raw API key. The actual key is never stored.
+    # Run `modelpointer key generate --name example-key` to create a real key.
+    hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    # disabled: true    # uncomment to revoke without deleting the entry
