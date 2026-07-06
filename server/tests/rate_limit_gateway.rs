@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use modelpointer::{
     auth::CachedApiKeyRepository,
+    log_sink::LogSink,
     quota_config::QuotaStore,
     rate_limit_redis::RedisRateLimiter,
     router::GatewayRouter,
@@ -134,12 +135,13 @@ async fn make_gateway_with_rl(
     context.upstream_registry.reload_all(vec![group]);
 
     let state = Arc::new(GatewayState {
-        router: Arc::new(GatewayRouter::new(&context).await.unwrap()),
+        router: Arc::new(GatewayRouter::new(&context, LogSink::noop()).await.unwrap()),
         context,
         api_key_repo: CachedApiKeyRepository::new().into_shared(),
         auth_required: false,
         rate_limiter: Some(rate_limiter),
         quota_store: QuotaStore::new(),
+        log_sink: LogSink::noop(),
     });
 
     build_app(state, 10 * 1024 * 1024, vec![], CorsLayer::new())
@@ -196,12 +198,13 @@ async fn make_two_tier_gateway(
     context.upstream_registry.reload_all(vec![group]);
 
     let state = Arc::new(GatewayState {
-        router: Arc::new(GatewayRouter::new(&context).await.unwrap()),
+        router: Arc::new(GatewayRouter::new(&context, LogSink::noop()).await.unwrap()),
         context,
         api_key_repo: CachedApiKeyRepository::new().into_shared(),
         auth_required: false,
         rate_limiter: Some(rate_limiter),
         quota_store: QuotaStore::new(),
+        log_sink: LogSink::noop(),
     });
 
     build_app(state, 10 * 1024 * 1024, vec![], CorsLayer::new())
@@ -352,12 +355,13 @@ async fn redis_rpm_different_models_are_independent() {
     context.upstream_registry.reload_all(groups);
 
     let state = Arc::new(GatewayState {
-        router: Arc::new(GatewayRouter::new(&context).await.unwrap()),
+        router: Arc::new(GatewayRouter::new(&context, LogSink::noop()).await.unwrap()),
         context,
         api_key_repo: CachedApiKeyRepository::new().into_shared(),
         auth_required: false,
         rate_limiter: Some(rl),
         quota_store: QuotaStore::new(),
+        log_sink: LogSink::noop(),
     });
     let app = build_app(state, 10 * 1024 * 1024, vec![], CorsLayer::new());
 
@@ -505,12 +509,13 @@ async fn redis_spillover_and_key_rpm_are_orthogonal() {
 
     context.upstream_registry.reload_all(vec![group]);
     let state = Arc::new(GatewayState {
-        router: Arc::new(GatewayRouter::new(&context).await.unwrap()),
+        router: Arc::new(GatewayRouter::new(&context, LogSink::noop()).await.unwrap()),
         context,
         api_key_repo: CachedApiKeyRepository::new().into_shared(),
         auth_required: false,
         rate_limiter: Some(rl),
         quota_store: QuotaStore::new(),
+        log_sink: LogSink::noop(),
     });
     let app = build_app(state, 10 * 1024 * 1024, vec![], CorsLayer::new());
 

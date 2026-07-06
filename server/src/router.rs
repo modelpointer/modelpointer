@@ -1,5 +1,5 @@
 use std::{
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Instant,
 };
 
@@ -664,6 +664,13 @@ impl GatewayRouter {
         let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
+                emit_access_log(
+                    &log_sink,
+                    &req_id, &api_key_id, model, endpoint,
+                    upstream.base_url(), 0,
+                    send_start.elapsed().as_millis() as u64,
+                    false, 0, 0.0, 0, 0, 0, "", "", "",
+                );
                 upstream.circuit_breaker().record_failure();
                 Metrics::record_gateway_error(model, endpoint, metrics_labels::ERROR_BACKEND);
                 return error_responses::service_unavailable(format!(
@@ -700,6 +707,13 @@ impl GatewayRouter {
                     );
                     Metrics::record_gateway_duration(model, endpoint, start.elapsed());
                 } else {
+                    emit_access_log(
+                        &log_sink,
+                        &req_id, &api_key_id, model, endpoint,
+                        upstream.base_url(), status.as_u16(),
+                        elapsed.as_millis() as u64,
+                        false, 0, 0.0, 0, 0, 0, "", "", "",
+                    );
                     upstream.circuit_breaker().record_failure();
                     Metrics::record_gateway_error(model, endpoint, metrics_labels::ERROR_BACKEND);
                 }
@@ -711,6 +725,13 @@ impl GatewayRouter {
                 response
             }
             Err(e) => {
+                emit_access_log(
+                    &log_sink,
+                    &req_id, &api_key_id, model, endpoint,
+                    upstream.base_url(), 0,
+                    send_start.elapsed().as_millis() as u64,
+                    false, 0, 0.0, 0, 0, 0, "", "", "",
+                );
                 upstream.circuit_breaker().record_failure();
                 Metrics::record_gateway_error(model, endpoint, metrics_labels::ERROR_BACKEND);
                 error_responses::internal_error(format!("Failed to read response: {}", e))
@@ -777,6 +798,7 @@ impl RouterTrait for GatewayRouter {
         let min_priority = ctx.min_priority;
         let is_streaming = body.stream;
 
+        let last_provider = Arc::new(Mutex::new(String::new()));
         let response = RetryExecutor::execute_response_with_retry(
             &self.retry_config,
             |attempt| {
@@ -820,6 +842,7 @@ impl RouterTrait for GatewayRouter {
                     error = Empty,
                 );
                 let log_sink = log_sink.clone();
+                let lp = Arc::clone(&last_provider);
 
                 async move {
                     let upstream = match upstream_result {
@@ -829,6 +852,7 @@ impl RouterTrait for GatewayRouter {
                             return error_responses::model_not_found(model);
                         }
                     };
+                    *lp.lock().unwrap() = upstream.base_url().to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
                     } else {
@@ -1041,6 +1065,14 @@ impl RouterTrait for GatewayRouter {
         if response.status().is_success() {
             Metrics::record_gateway_duration(model, ENDPOINT_CHAT, start.elapsed());
         } else {
+            let provider = last_provider.lock().unwrap().clone();
+            emit_access_log(
+                &log_sink,
+                &req_id, &api_key_id, model, ENDPOINT_CHAT,
+                &provider, response.status().as_u16(),
+                start.elapsed().as_millis() as u64,
+                is_streaming, 0, 0.0, 0, 0, 0, "", "", "",
+            );
             Metrics::record_gateway_error(model, ENDPOINT_CHAT, metrics_labels::ERROR_BACKEND);
         }
 
@@ -1083,6 +1115,7 @@ impl RouterTrait for GatewayRouter {
         let min_priority = ctx.min_priority;
         let is_streaming = body.is_stream();
 
+        let last_provider = Arc::new(Mutex::new(String::new()));
         let response = RetryExecutor::execute_response_with_retry(
             &self.retry_config,
             |attempt| {
@@ -1124,6 +1157,7 @@ impl RouterTrait for GatewayRouter {
                     error = Empty,
                 );
                 let log_sink = log_sink.clone();
+                let lp = Arc::clone(&last_provider);
 
                 async move {
                     let upstream = match upstream_result {
@@ -1133,6 +1167,7 @@ impl RouterTrait for GatewayRouter {
                             return error_responses::model_not_found(model);
                         }
                     };
+                    *lp.lock().unwrap() = upstream.base_url().to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
                     } else {
@@ -1334,6 +1369,14 @@ impl RouterTrait for GatewayRouter {
         if response.status().is_success() {
             Metrics::record_gateway_duration(model, ENDPOINT_MESSAGES, start.elapsed());
         } else {
+            let provider = last_provider.lock().unwrap().clone();
+            emit_access_log(
+                &log_sink,
+                &req_id, &api_key_id, model, ENDPOINT_MESSAGES,
+                &provider, response.status().as_u16(),
+                start.elapsed().as_millis() as u64,
+                is_streaming, 0, 0.0, 0, 0, 0, "", "", "",
+            );
             Metrics::record_gateway_error(model, ENDPOINT_MESSAGES, metrics_labels::ERROR_BACKEND);
         }
 
@@ -1374,6 +1417,7 @@ impl RouterTrait for GatewayRouter {
         let registry = Arc::clone(&self.upstream_registry);
         let min_priority = ctx.min_priority;
 
+        let last_provider = Arc::new(Mutex::new(String::new()));
         let response = RetryExecutor::execute_response_with_retry(
             &self.retry_config,
             |attempt| {
@@ -1414,6 +1458,7 @@ impl RouterTrait for GatewayRouter {
                     error = Empty,
                 );
                 let log_sink = log_sink.clone();
+                let lp = Arc::clone(&last_provider);
 
                 async move {
                     let upstream = match upstream_result {
@@ -1423,6 +1468,7 @@ impl RouterTrait for GatewayRouter {
                             return error_responses::model_not_found(model);
                         }
                     };
+                    *lp.lock().unwrap() = upstream.base_url().to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
                     } else {
@@ -1509,6 +1555,14 @@ impl RouterTrait for GatewayRouter {
         if response.status().is_success() {
             Metrics::record_gateway_duration(model, ENDPOINT_EMBEDDINGS, start.elapsed());
         } else {
+            let provider = last_provider.lock().unwrap().clone();
+            emit_access_log(
+                &log_sink,
+                &req_id, &api_key_id, model, ENDPOINT_EMBEDDINGS,
+                &provider, response.status().as_u16(),
+                start.elapsed().as_millis() as u64,
+                false, 0, 0.0, 0, 0, 0, "", "", "",
+            );
             Metrics::record_gateway_error(model, ENDPOINT_EMBEDDINGS, metrics_labels::ERROR_BACKEND);
         }
 
@@ -1547,6 +1601,7 @@ impl RouterTrait for GatewayRouter {
         let registry = Arc::clone(&self.upstream_registry);
         let model_arc = model.clone();
 
+        let last_provider = Arc::new(Mutex::new(String::new()));
         let response = RetryExecutor::execute_response_with_retry(
             &self.retry_config,
             |attempt| {
@@ -1590,6 +1645,7 @@ impl RouterTrait for GatewayRouter {
                     error = Empty,
                 );
                 let log_sink = log_sink.clone();
+                let lp = Arc::clone(&last_provider);
 
                 async move {
                     let upstream = match upstream_result {
@@ -1599,6 +1655,7 @@ impl RouterTrait for GatewayRouter {
                             return error_responses::provider_not_found(&provider_id);
                         }
                     };
+                    *lp.lock().unwrap() = upstream.base_url().to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
                     } else {
@@ -1805,6 +1862,14 @@ impl RouterTrait for GatewayRouter {
         if response.status().is_success() {
             Metrics::record_gateway_duration(&model, ENDPOINT_RESPONSES, start.elapsed());
         } else {
+            let provider = last_provider.lock().unwrap().clone();
+            emit_access_log(
+                &log_sink,
+                &req_id, &api_key_id, &model, ENDPOINT_RESPONSES,
+                &provider, response.status().as_u16(),
+                start.elapsed().as_millis() as u64,
+                is_streaming, 0, 0.0, 0, 0, 0, "", "", "",
+            );
             Metrics::record_gateway_error(&model, ENDPOINT_RESPONSES, metrics_labels::ERROR_BACKEND);
         }
 

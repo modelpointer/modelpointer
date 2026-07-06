@@ -71,10 +71,10 @@ routes:
 
 ```bash
 export DASHSCOPE_API_KEY=sk-...
-modelpointer serve --route-file routes.yaml
+modelpointer serve --route-file routes.yaml --no-auth
 ```
 
-The gateway listens on `http://localhost:8080`. Authentication is disabled when `--auth-file` is omitted — convenient for local testing.
+The gateway listens on `http://localhost:8080`. `--no-auth` disables API key authentication — convenient for local testing.
 
 Expected output:
 
@@ -127,7 +127,7 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
-> **Authentication is required in production.** Running without `--auth-file` disables all access control — suitable only for local testing.
+> **Authentication is required in production.** Pass `--no-auth` only for local testing; omitting it in file mode causes a startup error.
 
 > **Do not commit `auth.yaml`** — it contains key hashes.
 
@@ -249,7 +249,7 @@ The two protocol groups share the same physical backend on `node-1` but have sep
 | `GET`    | `/health`                        | none     | Health check                                     |
 
 
-Authentication is via `Authorization: Bearer <key>`. Omit `--auth-file` / skip database key setup to disable auth entirely.
+Authentication is via `Authorization: Bearer <key>`. Pass `--no-auth` to disable auth entirely (local testing only).
 
 ### Responses API — required headers
 
@@ -420,7 +420,8 @@ modelpointer key list auth.yaml
 | `--host`                        | `0.0.0.0`                            | Listen address                                   |
 | `--port`                        | `8080`                               | Listen port                                      |
 | `--route-file`                  | —                                    | Path to `routes.yaml`; enables file mode         |
-| `--auth-file`                   | —                                    | Path to `auth.yaml`; requires `--route-file`     |
+| `--auth-file`                   | —                                    | Path to `auth.yaml`; required in file mode unless `--no-auth` |
+| `--no-auth`                     | `false`                              | Disable API key auth entirely (local testing only) |
 | `--quota-file`                  | —                                    | Path to per-(key, model) rate-limit overrides    |
 | `--database-url`                | `sqlite://model_gateway.db?mode=rwc` | Database URL (database mode)                     |
 | `--log-dir`                     | —                                    | Directory for JSON access logs                   |

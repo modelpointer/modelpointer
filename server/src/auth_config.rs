@@ -7,7 +7,7 @@
 //! # Config structure
 //!
 //! ```yaml
-//! mode: api_key   # none | api_key
+//! mode: api_key
 //! keys:
 //!   - id: "7f3a9c2b-41d4-4a71-b446-655440000000"
 //!     name: "Service A Production"   # optional, human-readable label
@@ -59,7 +59,6 @@ fn is_false(b: &bool) -> bool {
 // ── Output ────────────────────────────────────────────────────────────────────
 
 pub struct AuthConfigOutput {
-    pub auth_required: bool,
     pub auth_keys: Vec<(String, ApiKeyLookupResult)>,
 }
 
@@ -102,7 +101,9 @@ impl AuthConfigSource {
 
 fn process_auth(raw: RawAuthConfig) -> Result<AuthConfigOutput, String> {
     match raw.mode.as_str() {
-        "none" => Ok(AuthConfigOutput { auth_required: false, auth_keys: vec![] }),
+        "none" => Err(
+            "auth.mode 'none' is no longer supported. Use the --no-auth flag instead.".to_string()
+        ),
         "api_key" => {
             if raw.keys.is_empty() {
                 return Err("auth.mode is 'api_key' but no keys are defined".to_string());
@@ -133,9 +134,9 @@ fn process_auth(raw: RawAuthConfig) -> Result<AuthConfigOutput, String> {
                 }));
             }
 
-            Ok(AuthConfigOutput { auth_required: true, auth_keys: keys })
+            Ok(AuthConfigOutput { auth_keys: keys })
         }
-        other => Err(format!("Unknown auth.mode '{}': expected 'none' or 'api_key'", other)),
+        other => Err(format!("Unknown auth.mode '{}': expected 'api_key'", other)),
     }
 }
 

@@ -211,11 +211,16 @@ struct ServeArgs {
     #[arg(long)]
     route_file: Option<String>,
 
-    /// Path to a YAML auth key file. When set, API key authentication is loaded
-    /// from this file and watched for changes. If omitted while --config-file is
-    /// used, the gateway runs without authentication.
+    /// Path to a YAML auth key file. Required unless --no-auth is set.
+    /// When set, API key authentication is loaded from this file and watched for changes.
     #[arg(long)]
     auth_file: Option<String>,
+
+    /// Disable API key authentication entirely. All requests are accepted without
+    /// a key. Must be set explicitly; there is no implicit no-auth path.
+    /// Cannot be combined with --auth-file.
+    #[arg(long, default_value_t = false, conflicts_with = "auth_file")]
+    no_auth: bool,
 
     /// Path to a YAML quota override file for per-(api_key, model) rate-limit overrides.
     #[arg(long)]
@@ -314,6 +319,7 @@ fn run_serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         auth_cache_ttl_secs: args.auth_cache_ttl_secs,
         route_file: args.route_file,
         auth_file: args.auth_file,
+        no_auth: args.no_auth,
         quota_file: args.quota_file,
         rate_limit: Some(modelpointer_core::config::RateLimitConfig {
             redis_url: args.rl_redis_url,

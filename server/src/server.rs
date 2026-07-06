@@ -31,10 +31,14 @@ use crate::auth_config::AuthConfigSource;
 use crate::rate_limit_memory::MemoryRateLimiter;
 use crate::quota_config::{QuotaConfigSource, QuotaStore};
 use crate::rate_limit_redis::RedisRateLimiter;
+use chrono::Utc;
 use crate::{
     router::{GatewayRouter, RequestContext, RouterTrait},
     middleware::{self, ApiKeyIdentity, RequestId},
-    log_sink::{self, LogSink, LogWriter},
+    log_sink::{self, LogSink, LogWriter, AccessLogRecord},
+};
+use modelpointer_core::observability::metrics::metrics_labels::{
+    ENDPOINT_CHAT, ENDPOINT_EMBEDDINGS, ENDPOINT_MESSAGES, ENDPOINT_RESPONSES,
 };
 use modelpointer_core::openai_protocol::{
     chat::ChatCompletionRequest,
@@ -56,6 +60,28 @@ pub struct GatewayState {
     pub rate_limiter: Option<Arc<dyn RateLimiter>>,
     /// Per-(api_key, model) quota overrides. Always present; empty when no quota file is configured.
     pub quota_store: Arc<QuotaStore>,
+    /// Cheap-to-clone handle for writing access log records (rate-limit rejections, etc.).
+    pub log_sink: LogSink,
+}
+
+fn emit_rl_log(sink: &LogSink, req_id: &str, api_key_id: &str, model: &str, endpoint: &str) {
+    sink.try_send(AccessLogRecord {
+        ts:                Utc::now(),
+        request_id:        req_id.to_owned(),
+        api_key_id:        api_key_id.to_owned(),
+        model:             model.to_owned(),
+        endpoint:          endpoint.to_owned(),
+        provider_url:      String::new(),
+        status_code:       429,
+        latency_ms:        0,
+        streaming:         false,
+        ttft_ms:           0,
+        tpot_ms:           0.0,
+        prompt_tokens:     0,
+        completion_tokens: 0,
+        total_tokens:      0,
+        finish_reason:     String::new(),
+    });
 }
 
 /// Check all rate limits for the given (api_key, model) pair.
@@ -249,7 +275,10 @@ async fn v1_chat_completions(
     info!("Received chat completion request for model: {}", body.model);
     let (rate_limit, min_priority) = match check_rate_limits(&state, &identity.key_id, &body.model, "openai").await {
         Ok(result) => result,
-        Err(resp) => return resp,
+        Err(resp) => {
+            emit_rl_log(&state.log_sink, &request_id.0, &identity.key_id, &body.model, ENDPOINT_CHAT);
+            return resp;
+        }
     };
     let ctx = RequestContext { request_id: request_id.0, api_key_id: identity.key_id, rate_limit, min_priority };
     state
@@ -267,7 +296,10 @@ async fn v1_messages(
 ) -> Response {
     let (rate_limit, min_priority) = match check_rate_limits(&state, &identity.key_id, &body.model, "anthropic").await {
         Ok(result) => result,
-        Err(resp) => return resp,
+        Err(resp) => {
+            emit_rl_log(&state.log_sink, &request_id.0, &identity.key_id, &body.model, ENDPOINT_MESSAGES);
+            return resp;
+        }
     };
     let ctx = RequestContext { request_id: request_id.0, api_key_id: identity.key_id, rate_limit, min_priority };
     state
@@ -286,7 +318,10 @@ async fn v1_embeddings(
     info!("Received embedding request for model: {}", body.model);
     let (rate_limit, min_priority) = match check_rate_limits(&state, &identity.key_id, &body.model, "openai").await {
         Ok(result) => result,
-        Err(resp) => return resp,
+        Err(resp) => {
+            emit_rl_log(&state.log_sink, &request_id.0, &identity.key_id, &body.model, ENDPOINT_EMBEDDINGS);
+            return resp;
+        }
     };
     let ctx = RequestContext { request_id: request_id.0, api_key_id: identity.key_id, rate_limit, min_priority };
     state
@@ -305,7 +340,10 @@ async fn v1_responses(
     let model_id = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
     let (rate_limit, min_priority) = match check_rate_limits(&state, &identity.key_id, model_id, "openai").await {
         Ok(result) => result,
-        Err(resp) => return resp,
+        Err(resp) => {
+            emit_rl_log(&state.log_sink, &request_id.0, &identity.key_id, model_id, ENDPOINT_RESPONSES);
+            return resp;
+        }
     };
     let ctx = RequestContext { request_id: request_id.0, api_key_id: identity.key_id, rate_limit, min_priority };
     state.router.route_responses(body, &headers, &ctx).await
@@ -549,9 +587,14 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         Some(db)
     };
 
-    // ── Auth: file, database, or none ─────────────────────────────────────────
+    // ── Auth: explicit no-auth, file, or database ────────────────────────────
     let (api_key_repo, auth_required): (Arc<dyn ApiKeyRepository>, bool) =
-        if let Some(auth_path) = &config.auth_file {
+        if config.no_auth {
+            // Explicit opt-out: accept all requests without a key.
+            warn!("--no-auth is set: API key authentication is disabled, all requests accepted");
+            let cached = CachedApiKeyRepository::new();
+            (cached.into_shared(), false)
+        } else if let Some(auth_path) = &config.auth_file {
             // Auth from file: load keys and watch for changes.
             info!("Loading auth config from file: {}", auth_path);
             let auth_output = AuthConfigSource::new(auth_path)
@@ -560,40 +603,39 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
             let cached = CachedApiKeyRepository::new();
             cached.reload(auth_output.auth_keys);
-            let auth_required = auth_output.auth_required;
+            info!("API key auth loaded from file");
 
-            if auth_required {
-                info!("API key auth loaded from file");
-                let cached_clone = cached.clone();
-                let path = auth_path.clone();
-                let interval = config.upstream_sync_interval_secs;
-                tokio::spawn(async move {
-                    let mut last_mod = file_modified_time(&path);
-                    let mut tick = tokio::time::interval(Duration::from_secs(interval));
+            let cached_clone = cached.clone();
+            let path = auth_path.clone();
+            let interval = config.upstream_sync_interval_secs;
+            tokio::spawn(async move {
+                let mut last_mod = file_modified_time(&path);
+                let mut tick = tokio::time::interval(Duration::from_secs(interval));
+                tick.tick().await;
+                loop {
                     tick.tick().await;
-                    loop {
-                        tick.tick().await;
-                        let current_mod = file_modified_time(&path);
-                        if current_mod != last_mod {
-                            last_mod = current_mod;
-                            match AuthConfigSource::new(&path).load() {
-                                Ok(out) => {
-                                    cached_clone.reload(out.auth_keys);
-                                    info!("Auth config reloaded from file");
-                                }
-                                Err(e) => tracing::warn!("Auth config reload failed: {}", e),
+                    let current_mod = file_modified_time(&path);
+                    if current_mod != last_mod {
+                        last_mod = current_mod;
+                        match AuthConfigSource::new(&path).load() {
+                            Ok(out) => {
+                                cached_clone.reload(out.auth_keys);
+                                info!("Auth config reloaded from file");
                             }
+                            Err(e) => tracing::warn!("Auth config reload failed: {}", e),
                         }
                     }
-                });
-            }
+                }
+            });
 
-            (cached.into_shared(), auth_required)
+            (cached.into_shared(), true)
         } else if config.route_file.is_some() {
-            // File route config without an auth file: no authentication.
-            warn!("No --auth-file provided, gateway accepts all requests without authentication");
-            let cached = CachedApiKeyRepository::new();
-            (cached.into_shared(), false)
+            // File route config without --auth-file and without --no-auth: refuse to start.
+            return Err(
+                "File config mode requires either --auth-file <path> or --no-auth. \
+                Pass --no-auth to run without API key authentication."
+                    .into(),
+            );
         } else {
             // Database mode: auth from DB (realtime or cached).
             let db = database.as_ref().expect("database must be connected in DB mode");
@@ -679,7 +721,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         None => (LogSink::noop(), LogWriter::noop()),
     };
 
-    let router: Arc<dyn RouterTrait> = Arc::new(GatewayRouter::new(&app_context, log_sink).await?);
+    let router: Arc<dyn RouterTrait> = Arc::new(GatewayRouter::new(&app_context, log_sink.clone()).await?);
 
     let rate_limiter: Option<Arc<dyn RateLimiter>> = if let Some(rl_cfg) = &config.rate_limit {
         if let Some(redis_url) = &rl_cfg.redis_url {
@@ -779,6 +821,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         auth_required,
         rate_limiter,
         quota_store,
+        log_sink,
     });
 
     let request_id_headers = config.request_id_headers.clone().unwrap_or_else(|| {

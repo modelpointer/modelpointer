@@ -25,6 +25,7 @@ use tower_http::cors::CorsLayer;
 
 use modelpointer::{
     auth::CachedApiKeyRepository,
+    log_sink::LogSink,
     quota_config::QuotaStore,
     router::GatewayRouter,
     server::{build_app, GatewayState},
@@ -155,12 +156,13 @@ async fn make_gateway(upstream_base_url: &str) -> Router {
     context.upstream_registry.reload_all(vec![group]);
 
     let state = Arc::new(GatewayState {
-        router: Arc::new(GatewayRouter::new(&context).await.unwrap()),
+        router: Arc::new(GatewayRouter::new(&context, LogSink::noop()).await.unwrap()),
         context,
         api_key_repo: CachedApiKeyRepository::new().into_shared(),
         auth_required: false,
         rate_limiter: None,
         quota_store: QuotaStore::new(),
+        log_sink: LogSink::noop(),
     });
 
     build_app(state, 10 * 1024 * 1024, vec![], CorsLayer::new())
@@ -496,12 +498,13 @@ async fn primary_unhealthy_routes_to_fallback() {
     context.upstream_registry.reload_all(vec![group]);
 
     let state = Arc::new(GatewayState {
-        router: Arc::new(GatewayRouter::new(&context).await.unwrap()),
+        router: Arc::new(GatewayRouter::new(&context, LogSink::noop()).await.unwrap()),
         context,
         api_key_repo: CachedApiKeyRepository::new().into_shared(),
         auth_required: false,
         rate_limiter: None,
         quota_store: QuotaStore::new(),
+        log_sink: LogSink::noop(),
     });
     let app = build_app(state, 10 * 1024 * 1024, vec![], CorsLayer::new());
 

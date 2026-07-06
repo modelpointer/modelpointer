@@ -74,10 +74,12 @@ pub struct ServerConfig {
     /// Path to a YAML route config file. When set, the gateway loads upstreams
     /// and routes from the file instead of connecting to a database.
     pub route_file: Option<String>,
-    /// Path to a YAML auth key file. When set, API key authentication is loaded
-    /// from the file instead of the database. Watched for changes and reloaded
-    /// automatically.
+    /// Path to a YAML auth key file. Required in file-config mode unless
+    /// --no-auth is set. Watched for changes and reloaded automatically.
     pub auth_file: Option<String>,
+    /// Disable API key authentication entirely. All requests are accepted without
+    /// a key. Must be set explicitly; there is no implicit no-auth path.
+    pub no_auth: bool,
     /// Rate limiter config. When absent, rate limiting is disabled.
     pub rate_limit: Option<RateLimitConfig>,
     /// Path to a YAML quota override file. When set, per-(api_key, model) limits
@@ -106,6 +108,7 @@ impl Default for ServerConfig {
             auth_cache_ttl_secs: 60,
             route_file: None,
             auth_file: None,
+            no_auth: false,
             rate_limit: None,
             quota_file: None,
         }
