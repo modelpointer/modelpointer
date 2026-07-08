@@ -206,6 +206,10 @@ struct ServeArgs {
     #[arg(long, default_value_t = false)]
     log_request_body: bool,
 
+    /// Disable automatic injection of stream_options.include_usage into streaming requests
+    #[arg(long, default_value_t = false)]
+    no_inject_stream_usage: bool,
+
     /// Path to a YAML route config file. When set, upstreams and routes are loaded
     /// from the file and no database connection is made.
     #[arg(long)]
@@ -304,6 +308,7 @@ fn run_serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
                 jitter_factor: args.retry_jitter_factor,
             }),
             log_request_body: args.log_request_body,
+            inject_stream_usage: !args.no_inject_stream_usage,
             ..Default::default()
         },
         database: DatabaseConfig {

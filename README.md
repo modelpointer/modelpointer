@@ -436,6 +436,8 @@ modelpointer key list auth.yaml
 | `--prometheus-port`             | `29000`                              | Prometheus metrics port                          |
 | `--request-timeout-secs`        | `30`                                 | Per-request upstream timeout                     |
 | `--upstream-sync-interval-secs` | `30`                                 | Database polling interval (database mode)        |
+| `--log-request-body`            | `false`                              | Log full request/response bodies in access log   |
+| `--no-inject-stream-usage`      | `false`                              | Disable auto-injection of `stream_options: {include_usage: true}` into streaming requests |
 
 
 ### Kubernetes Deployment

@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "modelpointer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "modelpointer-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",

@@ -1,6 +1,16 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
 FROM rust:1.88-slim AS builder
 
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV http_proxy=$HTTP_PROXY \
+    https_proxy=$HTTPS_PROXY \
+    HTTP_PROXY=$HTTP_PROXY \
+    HTTPS_PROXY=$HTTPS_PROXY \
+    no_proxy=$NO_PROXY \
+    NO_PROXY=$NO_PROXY
+
 WORKDIR /build
 
 # Install only the packages needed to compile SQLite (bundled by sqlx) and
@@ -18,10 +28,14 @@ COPY core/Cargo.toml core/Cargo.toml
 COPY server/Cargo.toml server/Cargo.toml
 
 # Create stub lib/main so `cargo build` has something to compile.
+# cargo fetch without --locked: stubs have fewer deps than real source, so the
+# resolved graph differs and --locked would fail. The lock file is already present
+# so the same versions are still used; --locked is enforced on the final real build.
 RUN mkdir -p core/src server/src \
     && echo "pub fn lib_stub() {}" > core/src/lib.rs \
     && echo "fn main() {}" > server/src/main.rs \
-    && cargo build --release --locked \
+    && cargo fetch \
+    && cargo build --release --offline \
     && rm -rf core/src server/src
 
 # Now copy the real source and rebuild only the application crates.

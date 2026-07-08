@@ -72,6 +72,7 @@ fn emit_rl_log(sink: &LogSink, req_id: &str, api_key_id: &str, model: &str, endp
         model:             model.to_owned(),
         endpoint:          endpoint.to_owned(),
         provider_url:      String::new(),
+        upstream_model:    String::new(),
         status_code:       429,
         latency_ms:        0,
         streaming:         false,

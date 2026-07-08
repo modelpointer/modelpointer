@@ -13,6 +13,7 @@ pub struct AccessLogRecord {
     pub model:             String,
     pub endpoint:          String,
     pub provider_url:      String,
+    pub upstream_model:    String,
     pub status_code:       u16,
     pub latency_ms:        u64,
     pub streaming:         bool,
@@ -54,6 +55,7 @@ async fn migrate_simple(pool: &AnyPool, dialect: DatabaseDialect) -> Result<(), 
             model             TEXT    NOT NULL DEFAULT '',
             endpoint          TEXT    NOT NULL DEFAULT '',
             provider_url      TEXT    NOT NULL DEFAULT '',
+            upstream_model    TEXT    NOT NULL DEFAULT '',
             status_code       INTEGER NOT NULL DEFAULT 0,
             latency_ms        INTEGER NOT NULL DEFAULT 0,
             streaming         BOOLEAN NOT NULL DEFAULT FALSE,
@@ -71,6 +73,11 @@ async fn migrate_simple(pool: &AnyPool, dialect: DatabaseDialect) -> Result<(), 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_access_log_ts ON access_log (ts)")
         .execute(pool)
         .await?;
+
+    // Add column to existing tables (ignore error if column already exists).
+    let _ = sqlx::query("ALTER TABLE access_log ADD COLUMN upstream_model TEXT NOT NULL DEFAULT ''")
+        .execute(pool)
+        .await;
 
     Ok(())
 }
@@ -103,6 +110,7 @@ async fn migrate_pg(pool: &AnyPool) -> Result<(), sqlx::Error> {
             model             TEXT    NOT NULL DEFAULT '',
             endpoint          TEXT    NOT NULL DEFAULT '',
             provider_url      TEXT    NOT NULL DEFAULT '',
+            upstream_model    TEXT    NOT NULL DEFAULT '',
             status_code       INTEGER NOT NULL DEFAULT 0,
             latency_ms        INTEGER NOT NULL DEFAULT 0,
             streaming         BOOLEAN NOT NULL DEFAULT FALSE,
@@ -114,6 +122,13 @@ async fn migrate_pg(pool: &AnyPool) -> Result<(), sqlx::Error> {
             finish_reason     TEXT    NOT NULL DEFAULT '',
             PRIMARY KEY (id, ts)
         ) PARTITION BY RANGE (ts)",
+    )
+    .execute(pool)
+    .await?;
+
+    // Add column to existing tables (IF NOT EXISTS avoids error on re-runs).
+    sqlx::query(
+        "ALTER TABLE access_log ADD COLUMN IF NOT EXISTS upstream_model TEXT NOT NULL DEFAULT ''",
     )
     .execute(pool)
     .await?;
@@ -242,7 +257,7 @@ pub async fn insert_batch(pool: &AnyPool, dialect: DatabaseDialect, records: &[A
         return;
     }
 
-    const COLS: usize = 15;
+    const COLS: usize = 16;
     // PostgreSQL uses positional placeholders ($1, $2, …); MySQL and SQLite use ?.
     // For PostgreSQL the ts column is TIMESTAMPTZ: cast the text parameter explicitly
     // so PostgreSQL's extended query protocol accepts it without a type mismatch.
@@ -261,14 +276,14 @@ pub async fn insert_batch(pool: &AnyPool, dialect: DatabaseDialect, records: &[A
     } else {
         records
             .iter()
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
             .collect::<Vec<_>>()
             .join(",")
     };
 
     let sql = format!(
         "INSERT INTO access_log \
-         (ts,request_id,api_key_id,model,endpoint,provider_url,\
+         (ts,request_id,api_key_id,model,endpoint,provider_url,upstream_model,\
           status_code,latency_ms,streaming,ttft_ms,tpot_ms,\
           prompt_tokens,completion_tokens,total_tokens,finish_reason) \
          VALUES {placeholders}"
@@ -294,6 +309,7 @@ pub async fn insert_batch(pool: &AnyPool, dialect: DatabaseDialect, records: &[A
             .bind(&r.model)
             .bind(&r.endpoint)
             .bind(&r.provider_url)
+            .bind(&r.upstream_model)
             .bind(r.status_code as i32)
             .bind(r.latency_ms as i64)
             .bind(r.streaming as i32)

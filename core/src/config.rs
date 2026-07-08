@@ -156,6 +156,10 @@ pub struct RouterConfig {
     /// Warning: for streaming responses the entire body will be buffered in memory.
     #[serde(default)]
     pub log_request_body: bool,
+    /// If true, automatically inject `stream_options: {include_usage: true}` into
+    /// streaming chat requests that do not already specify stream_options.
+    #[serde(default = "default_true")]
+    pub inject_stream_usage: bool,
 }
 
 impl Default for RouterConfig {
@@ -168,6 +172,7 @@ impl Default for RouterConfig {
             server_key: None,
             retry_config: None,
             log_request_body: false,
+            inject_stream_usage: true,
         }
     }
 }
@@ -204,4 +209,8 @@ impl Default for RetryConfig {
 
 fn default_retry_jitter_factor() -> f32 {
     0.2
+}
+
+fn default_true() -> bool {
+    true
 }
