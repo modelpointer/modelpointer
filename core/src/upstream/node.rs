@@ -52,6 +52,9 @@ pub trait Upstream: Send + Sync + fmt::Debug {
     /// Get the provider id for this upstream (credential name, e.g. "aliyun.beijing")
     fn provider_id(&self) -> &str;
 
+    /// Get the provider_node database ID. Empty string in config-file mode.
+    fn provider_node_id(&self) -> &str;
+
     /// Get the model name to use when forwarding to this upstream.
     /// Returns `None` if the gateway model name should be forwarded unchanged.
     fn upstream_model_name(&self) -> Option<&str>;
@@ -289,6 +292,10 @@ impl Upstream for UpstreamBinding {
         &self.node.profile.credential.name
     }
 
+    fn provider_node_id(&self) -> &str {
+        &self.node.profile.provider_node_id
+    }
+
     fn upstream_model_name(&self) -> Option<&str> {
         self.node.profile.upstream_model_name.as_deref()
     }
@@ -504,6 +511,8 @@ pub struct UpstreamCredential {
 pub struct UpstreamProfile {
     /// Upstream base URL. Endpoint paths are appended by the router.
     pub base_url: String,
+    /// Database ID of the provider_node record. Empty string in config-file mode.
+    pub provider_node_id: String,
     /// Which HTTP API contract this upstream expects.
     pub api_compatibility: ApiCompatibility,
     /// Runtime type of the inference backend.
@@ -535,6 +544,7 @@ impl Default for UpstreamProfile {
     fn default() -> Self {
         Self {
             base_url: "http://localhost:8000/v1".to_string(),
+            provider_node_id: String::new(),
             api_compatibility: ApiCompatibility::OpenAi,
             runtime_type: RuntimeType::External,
             credential: Arc::new(UpstreamCredential {
@@ -564,6 +574,7 @@ mod tests {
         UpstreamNode {
             profile: UpstreamProfile {
                 base_url: url.to_string(),
+                provider_node_id: String::new(),
                 api_compatibility: ApiCompatibility::OpenAi,
                 runtime_type: RuntimeType::External,
                 upstream_model_name: None,
@@ -645,6 +656,7 @@ mod tests {
         let node = UpstreamNode {
             profile: UpstreamProfile {
                 base_url: url.to_string(),
+                provider_node_id: String::new(),
                 api_compatibility: ApiCompatibility::OpenAi,
                 runtime_type: RuntimeType::External,
                 upstream_model_name: None,
@@ -766,6 +778,7 @@ mod tests {
         let node = UpstreamNode {
             profile: UpstreamProfile {
                 base_url: "http://primary".to_string(),
+                provider_node_id: String::new(),
                 api_compatibility: ApiCompatibility::OpenAi,
                 runtime_type: RuntimeType::External,
                 upstream_model_name: None,

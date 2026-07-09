@@ -387,6 +387,7 @@ fn emit_access_log(
     model: &str,
     endpoint: &str,
     provider_url: &str,
+    provider_node_id: &str,
     upstream_model: &str,
     status_code: u16,
     latency_ms: u64,
@@ -407,6 +408,7 @@ fn emit_access_log(
         model,
         endpoint,
         provider_url,
+        provider_node_id,
         upstream_model,
         status_code,
         latency_ms,
@@ -428,6 +430,7 @@ fn emit_access_log(
         model:             model.to_owned(),
         endpoint:          endpoint.to_owned(),
         provider_url:      provider_url.to_owned(),
+        provider_node_id:  provider_node_id.to_owned(),
         upstream_model:    upstream_model.to_owned(),
         status_code,
         latency_ms,
@@ -671,7 +674,8 @@ impl GatewayRouter {
                 emit_access_log(
                     &log_sink,
                     &req_id, &api_key_id, model, endpoint,
-                    upstream.base_url(), upstream.upstream_model_name().unwrap_or(model), 0,
+                    upstream.base_url(), upstream.provider_node_id(),
+                    upstream.upstream_model_name().unwrap_or(model), 0,
                     send_start.elapsed().as_millis() as u64,
                     false, 0, 0.0, 0, 0, 0, "", "", "",
                 );
@@ -703,7 +707,8 @@ impl GatewayRouter {
                     emit_access_log(
                         &log_sink,
                         &req_id, &api_key_id, model, endpoint,
-                        upstream.base_url(), upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
+                        upstream.base_url(), upstream.provider_node_id(),
+                        upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
                         elapsed.as_millis() as u64,
                         false, 0, 0.0,
                         usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
@@ -714,7 +719,8 @@ impl GatewayRouter {
                     emit_access_log(
                         &log_sink,
                         &req_id, &api_key_id, model, endpoint,
-                        upstream.base_url(), upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
+                        upstream.base_url(), upstream.provider_node_id(),
+                        upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
                         elapsed.as_millis() as u64,
                         false, 0, 0.0, 0, 0, 0, "", "", "",
                     );
@@ -732,7 +738,8 @@ impl GatewayRouter {
                 emit_access_log(
                     &log_sink,
                     &req_id, &api_key_id, model, endpoint,
-                    upstream.base_url(), upstream.upstream_model_name().unwrap_or(model), 0,
+                    upstream.base_url(), upstream.provider_node_id(),
+                    upstream.upstream_model_name().unwrap_or(model), 0,
                     send_start.elapsed().as_millis() as u64,
                     false, 0, 0.0, 0, 0, 0, "", "", "",
                 );
@@ -805,6 +812,7 @@ impl RouterTrait for GatewayRouter {
         let is_streaming = body.stream;
 
         let last_provider = Arc::new(Mutex::new(String::new()));
+        let last_provider_node_id = Arc::new(Mutex::new(String::new()));
         let last_upstream_model = Arc::new(Mutex::new(String::new()));
         let response = RetryExecutor::execute_response_with_retry(
             &self.retry_config,
@@ -853,6 +861,7 @@ impl RouterTrait for GatewayRouter {
                 );
                 let log_sink = log_sink.clone();
                 let lp = Arc::clone(&last_provider);
+                let lpni = Arc::clone(&last_provider_node_id);
                 let lum = Arc::clone(&last_upstream_model);
 
                 async move {
@@ -864,6 +873,7 @@ impl RouterTrait for GatewayRouter {
                         }
                     };
                     *lp.lock().unwrap() = upstream.base_url().to_string();
+                    *lpni.lock().unwrap() = upstream.provider_node_id().to_string();
                     *lum.lock().unwrap() = upstream.upstream_model_name().unwrap_or(model).to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
@@ -925,7 +935,8 @@ impl RouterTrait for GatewayRouter {
                                     emit_access_log(
                                         &log_sink,
                                         &req_id, &api_key_id, model, ENDPOINT_CHAT,
-                                        upstream.base_url(), upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
+                                        upstream.base_url(), upstream.provider_node_id(),
+                                        upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
                                         elapsed.as_millis() as u64,
                                         false, 0, 0.0,
                                         usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
@@ -960,6 +971,7 @@ impl RouterTrait for GatewayRouter {
                         let current_span = tracing::Span::current();
                         let model_id = model.to_string();
                         let provider = upstream.base_url().to_string();
+                        let provider_node_id_str = upstream.provider_node_id().to_string();
                         let upstream_model_str = upstream.upstream_model_name().unwrap_or(model).to_string();
                         let rate_limit_spawn = attempt_rate_limit.clone();
                         let cb_upstream = Arc::clone(&upstream);
@@ -1048,7 +1060,7 @@ impl RouterTrait for GatewayRouter {
                             emit_access_log(
                                 &log_sink,
                                 &req_id, &api_key_id, &model_id, ENDPOINT_CHAT,
-                                &provider, &upstream_model_str, status_code_u16,
+                                &provider, &provider_node_id_str, &upstream_model_str, status_code_u16,
                                 total_ms,
                                 true, ttft_ms, tpot_ms,
                                 last_usage.prompt_tokens, last_usage.completion_tokens, last_usage.total_tokens,
@@ -1079,11 +1091,12 @@ impl RouterTrait for GatewayRouter {
             Metrics::record_gateway_duration(model, ENDPOINT_CHAT, start.elapsed());
         } else {
             let provider = last_provider.lock().unwrap().clone();
+            let pnode_id = last_provider_node_id.lock().unwrap().clone();
             let upstream_model = last_upstream_model.lock().unwrap().clone();
             emit_access_log(
                 &log_sink,
                 &req_id, &api_key_id, model, ENDPOINT_CHAT,
-                &provider, &upstream_model, response.status().as_u16(),
+                &provider, &pnode_id, &upstream_model, response.status().as_u16(),
                 start.elapsed().as_millis() as u64,
                 is_streaming, 0, 0.0, 0, 0, 0, "", "", "",
             );
@@ -1130,6 +1143,7 @@ impl RouterTrait for GatewayRouter {
         let is_streaming = body.is_stream();
 
         let last_provider = Arc::new(Mutex::new(String::new()));
+        let last_provider_node_id = Arc::new(Mutex::new(String::new()));
         let last_upstream_model = Arc::new(Mutex::new(String::new()));
         let response = RetryExecutor::execute_response_with_retry(
             &self.retry_config,
@@ -1173,6 +1187,7 @@ impl RouterTrait for GatewayRouter {
                 );
                 let log_sink = log_sink.clone();
                 let lp = Arc::clone(&last_provider);
+                let lpni = Arc::clone(&last_provider_node_id);
                 let lum = Arc::clone(&last_upstream_model);
 
                 async move {
@@ -1184,6 +1199,7 @@ impl RouterTrait for GatewayRouter {
                         }
                     };
                     *lp.lock().unwrap() = upstream.base_url().to_string();
+                    *lpni.lock().unwrap() = upstream.provider_node_id().to_string();
                     *lum.lock().unwrap() = upstream.upstream_model_name().unwrap_or(model).to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
@@ -1240,7 +1256,8 @@ impl RouterTrait for GatewayRouter {
                                     emit_access_log(
                                         &log_sink,
                                         &req_id, &api_key_id, model, ENDPOINT_MESSAGES,
-                                        upstream.base_url(), upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
+                                        upstream.base_url(), upstream.provider_node_id(),
+                                        upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
                                         elapsed.as_millis() as u64,
                                         false, 0, 0.0,
                                         usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
@@ -1273,6 +1290,7 @@ impl RouterTrait for GatewayRouter {
                         let current_span = tracing::Span::current();
                         let model_id = model.to_string();
                         let provider = upstream.base_url().to_string();
+                        let provider_node_id_str = upstream.provider_node_id().to_string();
                         let upstream_model_str = upstream.upstream_model_name().unwrap_or(model).to_string();
                         let rate_limit_spawn = attempt_rate_limit.clone();
                         let cb_upstream = Arc::clone(&upstream);
@@ -1357,7 +1375,7 @@ impl RouterTrait for GatewayRouter {
                             emit_access_log(
                                 &log_sink,
                                 &req_id, &api_key_id, &model_id, ENDPOINT_MESSAGES,
-                                &provider, &upstream_model_str, status_code_u16,
+                                &provider, &provider_node_id_str, &upstream_model_str, status_code_u16,
                                 total_ms,
                                 true, ttft_ms, tpot_ms,
                                 last_usage.prompt_tokens, last_usage.completion_tokens, last_usage.total_tokens,
@@ -1388,11 +1406,12 @@ impl RouterTrait for GatewayRouter {
             Metrics::record_gateway_duration(model, ENDPOINT_MESSAGES, start.elapsed());
         } else {
             let provider = last_provider.lock().unwrap().clone();
+            let pnode_id = last_provider_node_id.lock().unwrap().clone();
             let upstream_model = last_upstream_model.lock().unwrap().clone();
             emit_access_log(
                 &log_sink,
                 &req_id, &api_key_id, model, ENDPOINT_MESSAGES,
-                &provider, &upstream_model, response.status().as_u16(),
+                &provider, &pnode_id, &upstream_model, response.status().as_u16(),
                 start.elapsed().as_millis() as u64,
                 is_streaming, 0, 0.0, 0, 0, 0, "", "", "",
             );
@@ -1437,6 +1456,7 @@ impl RouterTrait for GatewayRouter {
         let min_priority = ctx.min_priority;
 
         let last_provider = Arc::new(Mutex::new(String::new()));
+        let last_provider_node_id = Arc::new(Mutex::new(String::new()));
         let last_upstream_model = Arc::new(Mutex::new(String::new()));
         let response = RetryExecutor::execute_response_with_retry(
             &self.retry_config,
@@ -1479,6 +1499,7 @@ impl RouterTrait for GatewayRouter {
                 );
                 let log_sink = log_sink.clone();
                 let lp = Arc::clone(&last_provider);
+                let lpni = Arc::clone(&last_provider_node_id);
                 let lum = Arc::clone(&last_upstream_model);
 
                 async move {
@@ -1490,6 +1511,7 @@ impl RouterTrait for GatewayRouter {
                         }
                     };
                     *lp.lock().unwrap() = upstream.base_url().to_string();
+                    *lpni.lock().unwrap() = upstream.provider_node_id().to_string();
                     *lum.lock().unwrap() = upstream.upstream_model_name().unwrap_or(model).to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
@@ -1540,7 +1562,8 @@ impl RouterTrait for GatewayRouter {
                                 emit_access_log(
                                     &log_sink,
                                     &req_id, &api_key_id, model, ENDPOINT_EMBEDDINGS,
-                                    upstream.base_url(), upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
+                                    upstream.base_url(), upstream.provider_node_id(),
+                                    upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
                                     elapsed.as_millis() as u64,
                                     false, 0, 0.0,
                                     usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
@@ -1578,11 +1601,12 @@ impl RouterTrait for GatewayRouter {
             Metrics::record_gateway_duration(model, ENDPOINT_EMBEDDINGS, start.elapsed());
         } else {
             let provider = last_provider.lock().unwrap().clone();
+            let pnode_id = last_provider_node_id.lock().unwrap().clone();
             let upstream_model = last_upstream_model.lock().unwrap().clone();
             emit_access_log(
                 &log_sink,
                 &req_id, &api_key_id, model, ENDPOINT_EMBEDDINGS,
-                &provider, &upstream_model, response.status().as_u16(),
+                &provider, &pnode_id, &upstream_model, response.status().as_u16(),
                 start.elapsed().as_millis() as u64,
                 false, 0, 0.0, 0, 0, 0, "", "", "",
             );
@@ -1625,6 +1649,7 @@ impl RouterTrait for GatewayRouter {
         let model_arc = model.clone();
 
         let last_provider = Arc::new(Mutex::new(String::new()));
+        let last_provider_node_id = Arc::new(Mutex::new(String::new()));
         let last_upstream_model = Arc::new(Mutex::new(String::new()));
         let response = RetryExecutor::execute_response_with_retry(
             &self.retry_config,
@@ -1670,6 +1695,7 @@ impl RouterTrait for GatewayRouter {
                 );
                 let log_sink = log_sink.clone();
                 let lp = Arc::clone(&last_provider);
+                let lpni = Arc::clone(&last_provider_node_id);
                 let lum = Arc::clone(&last_upstream_model);
 
                 async move {
@@ -1681,6 +1707,7 @@ impl RouterTrait for GatewayRouter {
                         }
                     };
                     *lp.lock().unwrap() = upstream.base_url().to_string();
+                    *lpni.lock().unwrap() = upstream.provider_node_id().to_string();
                     *lum.lock().unwrap() = upstream.upstream_model_name().unwrap_or(model.as_str()).to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
@@ -1739,7 +1766,8 @@ impl RouterTrait for GatewayRouter {
                                     emit_access_log(
                                         &log_sink,
                                         &req_id, &api_key_id, &model, ENDPOINT_RESPONSES,
-                                        upstream.base_url(), upstream.upstream_model_name().unwrap_or(model.as_str()), status.as_u16(),
+                                        upstream.base_url(), upstream.provider_node_id(),
+                                        upstream.upstream_model_name().unwrap_or(model.as_str()), status.as_u16(),
                                         elapsed.as_millis() as u64,
                                         false, 0, 0.0,
                                         usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
@@ -1772,6 +1800,7 @@ impl RouterTrait for GatewayRouter {
 
                         let current_span = tracing::Span::current();
                         let provider = upstream.base_url().to_string();
+                        let provider_node_id_str = upstream.provider_node_id().to_string();
                         let upstream_model_str = upstream.upstream_model_name().unwrap_or(model.as_str()).to_string();
                         let rate_limit_spawn = attempt_rate_limit.clone();
                         let cb_upstream = Arc::clone(&upstream);
@@ -1859,7 +1888,7 @@ impl RouterTrait for GatewayRouter {
                             emit_access_log(
                                 &log_sink,
                                 &req_id, &api_key_id, &model, ENDPOINT_RESPONSES,
-                                &provider, &upstream_model_str, status_code_u16,
+                                &provider, &provider_node_id_str, &upstream_model_str, status_code_u16,
                                 total_ms, true, ttft_ms, tpot_ms,
                                 last_usage.prompt_tokens, last_usage.completion_tokens, last_usage.total_tokens,
                                 &last_finish_reason, &req_body_str, &resp_body_str,
@@ -1890,11 +1919,12 @@ impl RouterTrait for GatewayRouter {
             Metrics::record_gateway_duration(&model, ENDPOINT_RESPONSES, start.elapsed());
         } else {
             let provider = last_provider.lock().unwrap().clone();
+            let pnode_id = last_provider_node_id.lock().unwrap().clone();
             let upstream_model = last_upstream_model.lock().unwrap().clone();
             emit_access_log(
                 &log_sink,
                 &req_id, &api_key_id, &model, ENDPOINT_RESPONSES,
-                &provider, &upstream_model, response.status().as_u16(),
+                &provider, &pnode_id, &upstream_model, response.status().as_u16(),
                 start.elapsed().as_millis() as u64,
                 is_streaming, 0, 0.0, 0, 0, 0, "", "", "",
             );

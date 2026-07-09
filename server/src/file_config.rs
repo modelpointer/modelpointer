@@ -410,6 +410,7 @@ fn build_groups(
                 let node = UpstreamNode {
                     profile: UpstreamProfile {
                         base_url: url,
+                        provider_node_id: String::new(),
                         api_compatibility: ApiCompatibility::Native,
                         runtime_type: RuntimeType::External,
                         credential: Arc::new(UpstreamCredential {
@@ -482,6 +483,7 @@ fn make_binding(
     let node = UpstreamNode {
         profile: UpstreamProfile {
             base_url: ep.base_url.clone(),
+            provider_node_id: String::new(),
             api_compatibility: ep.compatibility.clone(),
             runtime_type: RuntimeType::External,
             credential: Arc::new(UpstreamCredential {

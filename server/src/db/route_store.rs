@@ -28,6 +28,7 @@ pub async fn load_all_upstream_groups(
                 CAST(mr.is_fallback AS INTEGER) as is_fallback,
                 mr.weight,
                 mr.upstream_model_name,
+                pn.id as provider_node_id,
                 pn.base_url,
                 pn.api_compatibility,
                 p.api_key,
@@ -51,6 +52,7 @@ pub async fn load_all_upstream_groups(
                 mr.is_fallback,
                 mr.weight,
                 mr.upstream_model_name,
+                pn.id as provider_node_id,
                 pn.base_url,
                 pn.api_compatibility,
                 p.api_key,
@@ -112,6 +114,7 @@ pub async fn load_all_upstream_groups(
         strategy: String,
         is_fallback: bool,
         weight: i64,
+        provider_node_id: String,
         base_url: String,
         api_compatibility: String,
         api_key: Option<String>,
@@ -137,6 +140,7 @@ pub async fn load_all_upstream_groups(
                 strategy: row.get::<String, _>("strategy"),
                 is_fallback: is_fallback != 0,
                 weight: row.get::<i64, _>("weight"),
+                provider_node_id: row.get::<String, _>("provider_node_id"),
                 base_url: row.get::<String, _>("base_url"),
                 api_compatibility,
                 api_key: row.try_get::<String, _>("api_key").ok(),
@@ -185,6 +189,7 @@ pub async fn load_all_upstream_groups(
                 let node = UpstreamNode {
                     profile: UpstreamProfile {
                         base_url: r.base_url,
+                        provider_node_id: r.provider_node_id,
                         api_compatibility: api_compat,
                         runtime_type: RuntimeType::External,
                         credential: Arc::new(UpstreamCredential {
