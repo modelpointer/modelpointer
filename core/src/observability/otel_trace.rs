@@ -8,29 +8,29 @@
 
 //! OpenTelemetry tracing integration.
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        OnceLock,
-    },
-    time::Duration,
-};
 use anyhow::Result;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
-use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
+use opentelemetry::{KeyValue, global, trace::TracerProvider as _};
 use opentelemetry_otlp::{Protocol, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::{
+    Resource,
     propagation::TraceContextPropagator,
     runtime,
     trace::{BatchConfigBuilder, BatchSpanProcessor, Tracer as SdkTracer, TracerProvider},
-    Resource,
+};
+use std::{
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 use tokio::task::spawn_blocking;
 use tracing::{Metadata, Subscriber};
 use tracing_opentelemetry::{self, OpenTelemetrySpanExt};
 use tracing_subscriber::{
-    layer::{Context, Filter},
     Layer,
+    layer::{Context, Filter},
 };
 
 /// Target prefixes forwarded to the OpenTelemetry tracing layer.
@@ -85,7 +85,12 @@ where
     }
 }
 
-pub fn otel_tracing_init(enable: bool, endpoint: &str, service_env: &str, service_version: &str) -> Result<()> {
+pub fn otel_tracing_init(
+    enable: bool,
+    endpoint: &str,
+    service_env: &str,
+    service_version: &str,
+) -> Result<()> {
     if !enable {
         // Use Release to ensure any prior OTEL state changes are visible
         ENABLED.store(false, Ordering::Release);
@@ -93,7 +98,7 @@ pub fn otel_tracing_init(enable: bool, endpoint: &str, service_env: &str, servic
     }
 
     let endpoint = if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-        format!("http://{}", endpoint)
+        format!("http://{endpoint}")
     } else {
         endpoint.to_string()
     };
@@ -103,7 +108,7 @@ pub fn otel_tracing_init(enable: bool, endpoint: &str, service_env: &str, servic
     let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client for OTLP exporter: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client for OTLP exporter: {e}"))?;
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
@@ -112,8 +117,8 @@ pub fn otel_tracing_init(enable: bool, endpoint: &str, service_env: &str, servic
         .with_protocol(Protocol::HttpBinary)
         .build()
         .map_err(|e| {
-            eprintln!("[tracing] Failed to create OTLP exporter: {}", e);
-            anyhow::anyhow!("Failed to create OTLP exporter: {}", e)
+            eprintln!("[tracing] Failed to create OTLP exporter: {e}");
+            anyhow::anyhow!("Failed to create OTLP exporter: {e}")
         })?;
 
     let batch_config = BatchConfigBuilder::default()
@@ -205,7 +210,7 @@ pub async fn flush_spans_async() -> Result<()> {
 
     spawn_blocking(move || provider.force_flush())
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to flush spans: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to flush spans: {e}"))?;
 
     Ok(())
 }
@@ -246,4 +251,3 @@ pub fn inject_trace_context_http(headers: &mut HeaderMap) {
         propagator.inject_context(&context, &mut HeaderInjector(headers));
     });
 }
-

@@ -15,7 +15,7 @@ fn generate_api_key() -> String {
     let random_part: String = (0..KEY_RANDOM_LEN)
         .map(|_| KEY_CHARS[rng.random_range(0..KEY_CHARS.len())] as char)
         .collect();
-    format!("{}{}", KEY_PREFIX, random_part)
+    format!("{KEY_PREFIX}{random_part}")
 }
 
 fn sha256_hex(input: &str) -> String {
@@ -32,22 +32,22 @@ pub fn cmd_generate(name: String, append: Option<String>) -> Result<(), String> 
     println!();
     println!("Generated API Key");
     println!("{}", "─".repeat(64));
-    println!("Key:  {}", key);
-    println!("ID:   {}", id);
-    println!("Name: {}", name);
-    println!("Hash: {}", hash);
+    println!("Key:  {key}");
+    println!("ID:   {id}");
+    println!("Name: {name}");
+    println!("Hash: {hash}");
 
     if let Some(file_path) = append {
         append_to_file(&file_path, &id, &name, &hash)?;
         println!();
-        println!("Appended to: {}", file_path);
+        println!("Appended to: {file_path}");
     } else {
         println!();
         println!("Add this entry to your auth.yaml:");
         println!();
-        println!("  - id: \"{}\"", id);
-        println!("    name: \"{}\"", name);
-        println!("    hash: \"{}\"", hash);
+        println!("  - id: \"{id}\"");
+        println!("    name: \"{name}\"");
+        println!("    hash: \"{hash}\"");
     }
 
     println!();
@@ -62,13 +62,15 @@ fn append_to_file(file_path: &str, id: &str, name: &str, hash: &str) -> Result<(
     let mut config = if path.exists() {
         AuthConfigSource::new(path).load_raw()?
     } else {
-        RawAuthConfig { mode: "api_key".to_string(), keys: vec![] }
+        RawAuthConfig {
+            mode: "api_key".to_string(),
+            keys: vec![],
+        }
     };
 
     if config.mode == "none" {
         return Err(format!(
-            "auth.mode is 'none' in '{}'. Change mode to 'api_key' before adding keys.",
-            file_path
+            "auth.mode is 'none' in '{file_path}'. Change mode to 'api_key' before adding keys."
         ));
     }
 
@@ -101,11 +103,15 @@ fn set_disabled(id: &str, file_path: &str, disabled: bool) -> Result<(), String>
         .keys
         .iter_mut()
         .find(|k| k.id == id)
-        .ok_or_else(|| format!("Key '{}' not found in '{}'", id, file_path))?;
+        .ok_or_else(|| format!("Key '{id}' not found in '{file_path}'"))?;
 
     if entry.disabled == disabled {
-        let state = if disabled { "already disabled" } else { "already active" };
-        println!("Key '{}' is {}.", id, state);
+        let state = if disabled {
+            "already disabled"
+        } else {
+            "already active"
+        };
+        println!("Key '{id}' is {state}.");
         return Ok(());
     }
 
@@ -114,8 +120,8 @@ fn set_disabled(id: &str, file_path: &str, disabled: bool) -> Result<(), String>
     source.save_raw(&config)?;
 
     let action = if disabled { "disabled" } else { "enabled" };
-    println!("Key '{}' ({}) has been {}.", name, id, action);
-    println!("File updated: {}", file_path);
+    println!("Key '{name}' ({id}) has been {action}.");
+    println!("File updated: {file_path}");
     println!("Changes take effect within the next reload interval.");
 
     Ok(())
@@ -126,7 +132,7 @@ fn set_disabled(id: &str, file_path: &str, disabled: bool) -> Result<(), String>
 pub fn cmd_list(file: String) -> Result<(), String> {
     let config = AuthConfigSource::new(&file).load_raw()?;
 
-    println!("File: {}", file);
+    println!("File: {file}");
     println!("Mode: {}", config.mode);
 
     if config.keys.is_empty() {
@@ -135,7 +141,7 @@ pub fn cmd_list(file: String) -> Result<(), String> {
     }
 
     println!();
-    println!("{:<38}  {:<24}  {}", "ID", "NAME", "STATUS");
+    println!("{:<38}  {:<24}  STATUS", "ID", "NAME");
     println!("{}", "─".repeat(72));
 
     for key in &config.keys {

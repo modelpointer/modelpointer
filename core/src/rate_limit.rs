@@ -7,7 +7,10 @@ use async_trait::async_trait;
 pub enum RateLimitKey {
     /// Per (api_key, model) — the finest-grained bucket.
     /// Redis key: `rl:key:{api_key_id}:model:{model_id}:{dim}`
-    KeyModel { api_key_id: String, model_id: String },
+    KeyModel {
+        api_key_id: String,
+        model_id: String,
+    },
 
     /// Per model across all API keys.
     /// Redis key: `rl:model:{model_id}:{dim}`

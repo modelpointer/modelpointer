@@ -27,8 +27,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use modelpointer_core::storage::ApiKeyLookupResult;
 use crate::env_expand::expand_env;
+use modelpointer_core::storage::ApiKeyLookupResult;
 
 // ── YAML structs (pub so key_cmd.rs can read/write the file) ─────────────────
 
@@ -82,18 +82,33 @@ impl AuthConfigSource {
 
     /// Load the raw YAML structure for inspection or modification.
     pub fn load_raw(&self) -> Result<RawAuthConfig, String> {
-        let content = std::fs::read_to_string(&self.path)
-            .map_err(|e| format!("Failed to read auth config '{}': {}", self.path.display(), e))?;
-        serde_yaml::from_str(&content)
-            .map_err(|e| format!("Auth config parse error in '{}': {}", self.path.display(), e))
+        let content = std::fs::read_to_string(&self.path).map_err(|e| {
+            format!(
+                "Failed to read auth config '{}': {}",
+                self.path.display(),
+                e
+            )
+        })?;
+        serde_yaml::from_str(&content).map_err(|e| {
+            format!(
+                "Auth config parse error in '{}': {}",
+                self.path.display(),
+                e
+            )
+        })
     }
 
     /// Write a raw config back to the file.
     pub fn save_raw(&self, config: &RawAuthConfig) -> Result<(), String> {
         let content = serde_yaml::to_string(config)
-            .map_err(|e| format!("Failed to serialize auth config: {}", e))?;
-        std::fs::write(&self.path, content)
-            .map_err(|e| format!("Failed to write auth config '{}': {}", self.path.display(), e))
+            .map_err(|e| format!("Failed to serialize auth config: {e}"))?;
+        std::fs::write(&self.path, content).map_err(|e| {
+            format!(
+                "Failed to write auth config '{}': {}",
+                self.path.display(),
+                e
+            )
+        })
     }
 }
 
@@ -102,7 +117,7 @@ impl AuthConfigSource {
 fn process_auth(raw: RawAuthConfig) -> Result<AuthConfigOutput, String> {
     match raw.mode.as_str() {
         "none" => Err(
-            "auth.mode 'none' is no longer supported. Use the --no-auth flag instead.".to_string()
+            "auth.mode 'none' is no longer supported. Use the --no-auth flag instead.".to_string(),
         ),
         "api_key" => {
             if raw.keys.is_empty() {
@@ -127,16 +142,19 @@ fn process_auth(raw: RawAuthConfig) -> Result<AuthConfigOutput, String> {
                     ));
                 };
 
-                keys.push((key_hash, ApiKeyLookupResult {
-                    id: entry.id.clone(),
-                    uid: entry.id,
-                    status: "active".to_string(),
-                }));
+                keys.push((
+                    key_hash,
+                    ApiKeyLookupResult {
+                        id: entry.id.clone(),
+                        uid: entry.id,
+                        status: "active".to_string(),
+                    },
+                ));
             }
 
             Ok(AuthConfigOutput { auth_keys: keys })
         }
-        other => Err(format!("Unknown auth.mode '{}': expected 'api_key'", other)),
+        other => Err(format!("Unknown auth.mode '{other}': expected 'api_key'")),
     }
 }
 

@@ -1,10 +1,13 @@
-use std::error::Error;
 use clap::{Args, Parser, Subcommand};
 use modelpointer_core::{
     config::{AuthMode, DatabaseConfig, RetryConfig, RouterConfig, ServerConfig, TraceConfig},
-    observability::{metrics::PrometheusConfig, otel_trace::{is_otel_enabled, shutdown_otel}},
+    observability::{
+        metrics::PrometheusConfig,
+        otel_trace::{is_otel_enabled, shutdown_otel},
+    },
     version,
 };
+use std::error::Error;
 
 mod auth;
 mod auth_config;
@@ -26,6 +29,7 @@ use db::{Database, DatabaseDialect, access_log_store};
 
 #[derive(Parser, Debug)]
 #[command(name = "modelpointer", about = "ModelPointer Gateway")]
+#[allow(clippy::large_enum_variant)]
 enum Cli {
     /// Start the gateway server
     Serve(ServeArgs),
@@ -82,7 +86,11 @@ struct CleanupArgs {
     older_than: String,
 
     /// Database URL (defaults to SQLite in the current directory)
-    #[arg(long, env = "DATABASE_URL", default_value = "sqlite://model_gateway.db?mode=rwc")]
+    #[arg(
+        long,
+        env = "DATABASE_URL",
+        default_value = "sqlite://model_gateway.db?mode=rwc"
+    )]
     database_url: String,
 }
 
@@ -118,6 +126,11 @@ struct ServeArgs {
     #[arg(long, default_value_t = 30)]
     upstream_sync_interval_secs: u64,
 
+    /// How often (in seconds) database-backed pollers force a full reload
+    /// regardless of the config version, as a safety net. 0 disables it.
+    #[arg(long, default_value_t = 3600)]
+    force_reload_interval_secs: u64,
+
     /// Maximum request payload size in bytes
     #[arg(long, default_value_t = 512 * 1024 * 1024)]
     max_payload_size: usize,
@@ -135,7 +148,11 @@ struct ServeArgs {
     enable_trace: bool,
 
     /// OTLP traces endpoint
-    #[arg(long, env = "OTLP_ENDPOINT", default_value = "http://localhost:4318/v1/traces")]
+    #[arg(
+        long,
+        env = "OTLP_ENDPOINT",
+        default_value = "http://localhost:4318/v1/traces"
+    )]
     otlp_traces_endpoint: String,
 
     /// Database max connections
@@ -151,7 +168,11 @@ struct ServeArgs {
     db_acquire_timeout_secs: u64,
 
     /// Database URL
-    #[arg(long, env = "DATABASE_URL", default_value = "sqlite://model_gateway.db?mode=rwc")]
+    #[arg(
+        long,
+        env = "DATABASE_URL",
+        default_value = "sqlite://model_gateway.db?mode=rwc"
+    )]
     database_url: String,
 
     /// Prometheus metrics host
@@ -197,10 +218,6 @@ struct ServeArgs {
     /// API key authentication mode: "cached" or "realtime"
     #[arg(long, default_value = "cached")]
     auth_mode: String,
-
-    /// How often (in seconds) the cached auth mode reloads active keys
-    #[arg(long, default_value_t = 60)]
-    auth_cache_ttl_secs: u64,
 
     /// Log full request and response bodies in the access log
     #[arg(long, default_value_t = false)]
@@ -255,9 +272,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     match Cli::parse() {
-        Cli::Serve(args)      => run_serve(args),
-        Cli::Key { command }  => run_key(command),
-        Cli::Cleanup(args)    => run_cleanup(args),
+        Cli::Serve(args) => run_serve(args),
+        Cli::Key { command } => run_key(command),
+        Cli::Cleanup(args) => run_cleanup(args),
     }
 }
 
@@ -266,11 +283,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn run_serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     println!("modelpointer starting...");
 
-    let server_cert = args.tls_cert_path
-        .map(|p| std::fs::read(&p).map_err(|e| format!("Failed to read TLS cert '{}': {}", p, e)))
+    let server_cert = args
+        .tls_cert_path
+        .map(|p| std::fs::read(&p).map_err(|e| format!("Failed to read TLS cert '{p}': {e}")))
         .transpose()?;
-    let server_key = args.tls_key_path
-        .map(|p| std::fs::read(&p).map_err(|e| format!("Failed to read TLS key '{}': {}", p, e)))
+    let server_key = args
+        .tls_key_path
+        .map(|p| std::fs::read(&p).map_err(|e| format!("Failed to read TLS key '{p}': {e}")))
         .transpose()?;
 
     let server_config = ServerConfig {
@@ -283,6 +302,7 @@ fn run_serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             .then_some(args.request_id_headers),
         shutdown_grace_period_secs: args.shutdown_grace_period_secs,
         upstream_sync_interval_secs: args.upstream_sync_interval_secs,
+        force_reload_interval_secs: args.force_reload_interval_secs,
         max_payload_size: args.max_payload_size,
         cors_allowed_origins: args.cors_allowed_origins,
         trace_config: Some(TraceConfig {
@@ -321,7 +341,6 @@ fn run_serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
             "realtime" => AuthMode::Realtime,
             _ => AuthMode::Cached,
         },
-        auth_cache_ttl_secs: args.auth_cache_ttl_secs,
         route_file: args.route_file,
         auth_file: args.auth_file,
         no_auth: args.no_auth,
@@ -350,7 +369,11 @@ fn run_cleanup(args: CleanupArgs) -> Result<(), Box<dyn Error>> {
         ))?;
 
     let cutoff = chrono::Utc::now() - duration;
-    println!("Deleting access log records older than {} (cutoff: {})", args.older_than, cutoff.to_rfc3339());
+    println!(
+        "Deleting access log records older than {} (cutoff: {})",
+        args.older_than,
+        cutoff.to_rfc3339()
+    );
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
@@ -360,7 +383,8 @@ fn run_cleanup(args: CleanupArgs) -> Result<(), Box<dyn Error>> {
             min_connections: 1,
             acquire_timeout_secs: 5,
         };
-        let db = Database::connect(&db_config).await
+        let db = Database::connect(&db_config)
+            .await
             .map_err(|e| format!("Failed to connect to database: {e}"))?;
 
         match db.dialect() {

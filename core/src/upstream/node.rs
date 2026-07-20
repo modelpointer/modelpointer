@@ -1,19 +1,19 @@
 use std::{
     fmt,
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     },
 };
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::model::ModelCard;
 use super::{
     CircuitBreaker,
     routing::{self, RoutingStrategy, RoutingStrategyConfig},
 };
+use crate::model::ModelCard;
 
 /// Core abstraction for a backend upstream service.
 #[async_trait]
@@ -114,7 +114,7 @@ impl std::str::FromStr for ProviderType {
             "baidu" => Ok(ProviderType::Baidu),
             "cohere" => Ok(ProviderType::Cohere),
             "unknown" => Ok(ProviderType::Unknown),
-            other => Err(format!("Unknown provider type: {}", other)),
+            other => Err(format!("Unknown provider type: {other}")),
         }
     }
 }
@@ -155,7 +155,7 @@ impl std::str::FromStr for RuntimeType {
         } else if s.eq_ignore_ascii_case("external") {
             Ok(RuntimeType::External)
         } else {
-            Err(format!("Unknown runtime type: {}", s))
+            Err(format!("Unknown runtime type: {s}"))
         }
     }
 }
@@ -196,7 +196,7 @@ impl std::str::FromStr for ApiCompatibility {
         } else if s.eq_ignore_ascii_case("native") {
             Ok(ApiCompatibility::Native)
         } else {
-            Err(format!("Unknown API compatibility: {}", s))
+            Err(format!("Unknown API compatibility: {s}"))
         }
     }
 }
@@ -209,6 +209,7 @@ impl std::str::FromStr for ApiCompatibility {
 /// The `priority` field implements tiered routing:
 /// - `0` = primary tier (preferred; used first)
 /// - `1` = fallback tier (used when all primary upstreams are unavailable)
+///
 /// Higher numbers are tried in ascending order; values should be contiguous.
 #[derive(Debug)]
 pub struct UpstreamBinding {
@@ -460,7 +461,9 @@ impl UpstreamGroup {
         min_priority: u8,
     ) -> Option<Arc<dyn Upstream>> {
         // Collect distinct priority tiers >= min_priority, in ascending order.
-        let mut tiers: Vec<u8> = self.upstreams.iter()
+        let mut tiers: Vec<u8> = self
+            .upstreams
+            .iter()
             .map(|b| b.priority)
             .filter(|&p| p >= min_priority)
             .collect();
@@ -468,12 +471,18 @@ impl UpstreamGroup {
         tiers.dedup();
 
         for tier in tiers {
-            let candidates: Vec<&Arc<UpstreamBinding>> = self.upstreams.iter()
+            let candidates: Vec<&Arc<UpstreamBinding>> = self
+                .upstreams
+                .iter()
                 .filter(|b| {
                     b.priority == tier
                         && b.is_available()
-                        && runtime_type.map(|rt| b.runtime_type() == rt).unwrap_or(true)
-                        && api_compatibility.map(|ac| b.api_compatibility() == ac).unwrap_or(true)
+                        && runtime_type
+                            .map(|rt| b.runtime_type() == rt)
+                            .unwrap_or(true)
+                        && api_compatibility
+                            .map(|ac| b.api_compatibility() == ac)
+                            .unwrap_or(true)
                 })
                 .collect();
 
@@ -483,9 +492,12 @@ impl UpstreamGroup {
 
             return match self.strategy {
                 RoutingStrategy::Swrr => routing::select_swrr(&candidates, &self.swrr_lock),
-                RoutingStrategy::WeightedHash => {
-                    routing::select_weighted_hash(&candidates, routing_key, &self.model.id, &self.hash_cursor)
-                }
+                RoutingStrategy::WeightedHash => routing::select_weighted_hash(
+                    &candidates,
+                    routing_key,
+                    &self.model.id,
+                    &self.hash_cursor,
+                ),
             };
         }
         None
@@ -590,19 +602,25 @@ mod tests {
 
     #[test]
     fn binding_rejects_zero_weight() {
-        assert!(UpstreamBinding::new(
-            build_node("http://a"),
-            true,
-            RoutingStrategyConfig::Swrr { weight: 0 },
-            0,
-        ).is_err());
+        assert!(
+            UpstreamBinding::new(
+                build_node("http://a"),
+                true,
+                RoutingStrategyConfig::Swrr { weight: 0 },
+                0,
+            )
+            .is_err()
+        );
 
-        assert!(UpstreamBinding::new(
-            build_node("http://a"),
-            true,
-            RoutingStrategyConfig::WeightedHash { weight: 0 },
-            0,
-        ).is_err());
+        assert!(
+            UpstreamBinding::new(
+                build_node("http://a"),
+                true,
+                RoutingStrategyConfig::WeightedHash { weight: 0 },
+                0,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -617,19 +635,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(group.strategy, RoutingStrategy::Swrr);
-        assert!(group
-            .upstreams
-            .iter()
-            .all(|b| matches!(b.strategy_config, RoutingStrategyConfig::Swrr { .. })));
+        assert!(
+            group
+                .upstreams
+                .iter()
+                .all(|b| matches!(b.strategy_config, RoutingStrategyConfig::Swrr { .. }))
+        );
     }
 
     #[test]
     fn group_rejects_empty_upstreams() {
-        assert!(UpstreamGroup::new(
-            ModelCard::new("test-model"),
-            RoutingStrategy::Swrr,
-            vec![],
-        ).is_err());
+        assert!(
+            UpstreamGroup::new(ModelCard::new("test-model"), RoutingStrategy::Swrr, vec![],)
+                .is_err()
+        );
     }
 
     #[test]
@@ -643,7 +662,8 @@ mod tests {
                     true,
                     RoutingStrategyConfig::WeightedHash { weight: 1 },
                     0,
-                ).unwrap(),
+                )
+                .unwrap(),
             ],
         );
         assert!(result.is_err());
@@ -668,7 +688,13 @@ mod tests {
             },
             healthy: Arc::new(AtomicBool::new(healthy)),
         };
-        UpstreamBinding::new(node, true, RoutingStrategyConfig::Swrr { weight: 1 }, priority).unwrap()
+        UpstreamBinding::new(
+            node,
+            true,
+            RoutingStrategyConfig::Swrr { weight: 1 },
+            priority,
+        )
+        .unwrap()
     }
 
     fn build_group(bindings: Vec<UpstreamBinding>) -> UpstreamGroup {
@@ -702,10 +728,7 @@ mod tests {
     fn select_falls_through_to_fallback_when_primary_disabled() {
         let mut primary = build_binding("http://primary", true, 0);
         primary.enabled = false;
-        let group = build_group(vec![
-            primary,
-            build_binding("http://fallback", true, 1),
-        ]);
+        let group = build_group(vec![primary, build_binding("http://fallback", true, 1)]);
         let url = group.select(None, None, None).unwrap();
         assert_eq!(url.base_url(), "http://fallback");
     }
@@ -757,7 +780,11 @@ mod tests {
             build_binding("http://primary", true, 0),
             build_binding("http://fallback", true, 1),
         ]);
-        assert!(group.select_with_min_priority(None, None, None, 2).is_none());
+        assert!(
+            group
+                .select_with_min_priority(None, None, None, 2)
+                .is_none()
+        );
     }
 
     #[test]
@@ -790,21 +817,28 @@ mod tests {
             },
             healthy: healthy.clone(),
         };
-        let primary = UpstreamBinding::new(node, true, RoutingStrategyConfig::Swrr { weight: 1 }, 0).unwrap();
-        let group = build_group(vec![
-            primary,
-            build_binding("http://fallback", true, 1),
-        ]);
+        let primary =
+            UpstreamBinding::new(node, true, RoutingStrategyConfig::Swrr { weight: 1 }, 0).unwrap();
+        let group = build_group(vec![primary, build_binding("http://fallback", true, 1)]);
 
         // Initially primary is selected.
-        assert_eq!(group.select(None, None, None).unwrap().base_url(), "http://primary");
+        assert_eq!(
+            group.select(None, None, None).unwrap().base_url(),
+            "http://primary"
+        );
 
         // Flip the flag → fallback takes over without rebuilding the group.
         healthy.store(false, Ordering::Release);
-        assert_eq!(group.select(None, None, None).unwrap().base_url(), "http://fallback");
+        assert_eq!(
+            group.select(None, None, None).unwrap().base_url(),
+            "http://fallback"
+        );
 
         // Restore → primary selected again.
         healthy.store(true, Ordering::Release);
-        assert_eq!(group.select(None, None, None).unwrap().base_url(), "http://primary");
+        assert_eq!(
+            group.select(None, None, None).unwrap().base_url(),
+            "http://primary"
+        );
     }
 }

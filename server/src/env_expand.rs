@@ -11,7 +11,7 @@ pub fn expand_env(s: &str) -> Result<String, String> {
                 return Err("Empty variable reference ${}".to_string());
             }
             let val = std::env::var(&var)
-                .map_err(|_| format!("Environment variable '{}' is not set", var))?;
+                .map_err(|_| format!("Environment variable '{var}' is not set"))?;
             result.push_str(&val);
         } else {
             result.push(c);

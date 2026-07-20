@@ -6,8 +6,8 @@ use sqlx::{AnyPool, Row};
 
 use modelpointer_core::model::ModelCard;
 use modelpointer_core::upstream::node::{
-    ApiCompatibility, UpstreamBinding, UpstreamCredential, UpstreamGroup, UpstreamNode,
-    UpstreamProfile, RuntimeType, ProviderType,
+    ApiCompatibility, ProviderType, RuntimeType, UpstreamBinding, UpstreamCredential,
+    UpstreamGroup, UpstreamNode, UpstreamProfile,
 };
 use modelpointer_core::upstream::routing::{RoutingStrategy, RoutingStrategyConfig};
 
@@ -21,7 +21,8 @@ pub async fn load_all_upstream_groups(
     dialect: DatabaseDialect,
 ) -> Result<Vec<UpstreamGroup>, String> {
     let sql = match dialect {
-        DatabaseDialect::Postgres => r#"
+        DatabaseDialect::Postgres => {
+            r#"
             SELECT
                 mr.model_id,
                 mr.strategy,
@@ -44,8 +45,10 @@ pub async fn load_all_upstream_groups(
             JOIN models m ON m.id = mr.model_id
             WHERE m.status != 'disabled'
             ORDER BY mr.model_id, pn.api_compatibility, mr.is_fallback, mr.weight DESC
-        "#,
-        _ => r#"
+        "#
+        }
+        _ => {
+            r#"
             SELECT
                 mr.model_id,
                 mr.strategy,
@@ -68,13 +71,14 @@ pub async fn load_all_upstream_groups(
             JOIN models m ON m.id = mr.model_id
             WHERE m.status != 'disabled'
             ORDER BY mr.model_id, pn.api_compatibility, mr.is_fallback, mr.weight DESC
-        "#,
+        "#
+        }
     };
 
     let rows = sqlx::query(sql)
         .fetch_all(pool)
         .await
-        .map_err(|e| format!("DB error loading model routes: {}", e))?;
+        .map_err(|e| format!("DB error loading model routes: {e}"))?;
 
     if rows.is_empty() {
         return Ok(vec![]);
@@ -83,7 +87,7 @@ pub async fn load_all_upstream_groups(
     let alias_rows = sqlx::query("SELECT alias, model_id FROM model_aliases")
         .fetch_all(pool)
         .await
-        .map_err(|e| format!("DB error loading model aliases: {}", e))?;
+        .map_err(|e| format!("DB error loading model aliases: {e}"))?;
 
     let mut aliases_map: HashMap<String, Vec<String>> = HashMap::new();
     for row in alias_rows {
@@ -95,18 +99,24 @@ pub async fn load_all_upstream_groups(
     // Load per-protocol primary-tier capacity from model_protocol_capacity.
     // Keyed by (model_id, protocol) -> (capacity_rpm, capacity_tpm).
     let capacity_rows = sqlx::query(
-        "SELECT model_id, protocol, capacity_rpm, capacity_tpm FROM model_protocol_capacity"
+        "SELECT model_id, protocol, capacity_rpm, capacity_tpm FROM model_protocol_capacity",
     )
     .fetch_all(pool)
     .await
-    .map_err(|e| format!("DB error loading model_protocol_capacity: {}", e))?;
+    .map_err(|e| format!("DB error loading model_protocol_capacity: {e}"))?;
 
     let mut capacity_map: HashMap<(String, String), (Option<u32>, Option<u32>)> = HashMap::new();
     for row in capacity_rows {
         let model_id: String = row.get("model_id");
         let protocol: String = row.get("protocol");
-        let cap_rpm: Option<u32> = row.try_get::<i64, _>("capacity_rpm").ok().map(|v| u32::try_from(v).unwrap_or(u32::MAX));
-        let cap_tpm: Option<u32> = row.try_get::<i64, _>("capacity_tpm").ok().map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+        let cap_rpm: Option<u32> = row
+            .try_get::<i64, _>("capacity_rpm")
+            .ok()
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+        let cap_tpm: Option<u32> = row
+            .try_get::<i64, _>("capacity_tpm")
+            .ok()
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
         capacity_map.insert((model_id, protocol), (cap_rpm, cap_tpm));
     }
 
@@ -163,10 +173,22 @@ pub async fn load_all_upstream_groups(
         };
 
         // Rate limit fields are model-level; read from first row.
-        let key_rpm = rows.first().and_then(|r| r.key_rpm).map(|v| u32::try_from(v).unwrap_or(u32::MAX));
-        let key_tpm = rows.first().and_then(|r| r.key_tpm).map(|v| u32::try_from(v).unwrap_or(u32::MAX));
-        let model_rpm = rows.first().and_then(|r| r.model_rpm).map(|v| u32::try_from(v).unwrap_or(u32::MAX));
-        let model_tpm = rows.first().and_then(|r| r.model_tpm).map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+        let key_rpm = rows
+            .first()
+            .and_then(|r| r.key_rpm)
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+        let key_tpm = rows
+            .first()
+            .and_then(|r| r.key_tpm)
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+        let model_rpm = rows
+            .first()
+            .and_then(|r| r.model_rpm)
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+        let model_tpm = rows
+            .first()
+            .and_then(|r| r.model_tpm)
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
 
         // Per-protocol primary-tier capacity.
         let (primary_capacity_rpm, primary_capacity_tpm) = capacity_map
@@ -195,7 +217,8 @@ pub async fn load_all_upstream_groups(
                         credential: Arc::new(UpstreamCredential {
                             name: r.provider_name,
                             api_key: r.api_key,
-                            provider_type: r.provider_type
+                            provider_type: r
+                                .provider_type
                                 .as_deref()
                                 .and_then(|s| s.parse().ok())
                                 .unwrap_or(ProviderType::Unknown),
@@ -222,9 +245,14 @@ pub async fn load_all_upstream_groups(
             Ok(group) => groups.push(
                 group
                     .with_rate_limits(key_rpm, key_tpm, model_rpm, model_tpm)
-                    .with_primary_capacity(primary_capacity_rpm, primary_capacity_tpm)
+                    .with_primary_capacity(primary_capacity_rpm, primary_capacity_tpm),
             ),
-            Err(e) => tracing::warn!("Skipping model '{}' protocol '{}': {}", model_id, protocol, e),
+            Err(e) => tracing::warn!(
+                "Skipping model '{}' protocol '{}': {}",
+                model_id,
+                protocol,
+                e
+            ),
         }
     }
 

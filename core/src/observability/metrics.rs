@@ -9,11 +9,14 @@
 use std::{
     borrow::Cow,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{atomic::{AtomicUsize, Ordering}, Arc},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
-use dashmap::{mapref::entry::Entry, DashMap};
+use dashmap::{DashMap, mapref::entry::Entry};
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use once_cell::sync::Lazy;
@@ -100,11 +103,7 @@ pub const STREAMING_TRUE: &str = "true";
 pub const STREAMING_FALSE: &str = "false";
 
 pub const fn bool_to_static_str(b: bool) -> &'static str {
-    if b {
-        STREAMING_TRUE
-    } else {
-        STREAMING_FALSE
-    }
+    if b { STREAMING_TRUE } else { STREAMING_FALSE }
 }
 
 /// Static lookup table for common HTTP status codes to avoid allocations.
@@ -191,83 +190,83 @@ impl Default for PrometheusConfig {
 pub(crate) fn init_metrics() {
     // Layer 1: HTTP entry point
     describe_counter!(
-        "mg_http_requests_total",
+        "modelpointer_http_requests_total",
         "Total HTTP requests by method and path"
     );
     describe_counter!(
-        "mg_http_responses_total",
+        "modelpointer_http_responses_total",
         "Total HTTP responses by status_code and error_code"
     );
 
     // Layer 2: Gateway end-to-end (includes retries)
     describe_counter!(
-        "mg_gateway_requests_total",
+        "modelpointer_gateway_requests_total",
         "Total gateway requests by model, endpoint, streaming"
     );
     describe_histogram!(
-        "mg_gateway_duration_seconds",
+        "modelpointer_gateway_duration_seconds",
         "End-to-end gateway request duration by model and endpoint (includes retries)"
     );
     describe_counter!(
-        "mg_gateway_errors_total",
+        "modelpointer_gateway_errors_total",
         "Gateway errors by model, endpoint, error_type"
     );
 
     // Layer 3: Upstream single-attempt calls
     describe_counter!(
-        "mg_upstream_requests_total",
+        "modelpointer_upstream_requests_total",
         "Per-attempt upstream requests by model, provider, status_code"
     );
     describe_histogram!(
-        "mg_upstream_duration_seconds",
+        "modelpointer_upstream_duration_seconds",
         "Per-attempt upstream call duration by model and provider"
     );
     describe_histogram!(
-        "mg_upstream_ttft_seconds",
+        "modelpointer_upstream_ttft_seconds",
         "Time to first token for streaming requests by model and provider"
     );
 
     // Layer 4: Retry
     describe_counter!(
-        "mg_retry_attempts_total",
+        "modelpointer_retry_attempts_total",
         "Retry attempts by model, endpoint, status_code that triggered the retry"
     );
     describe_counter!(
-        "mg_retry_exhausted_total",
+        "modelpointer_retry_exhausted_total",
         "Requests that exhausted all retry attempts by model and endpoint"
     );
 
     // Layer 5: Circuit breaker
     describe_gauge!(
-        "mg_worker_cb_state",
+        "modelpointer_worker_cb_state",
         "Circuit breaker state per worker (0=closed, 1=open, 2=half_open)"
     );
     describe_counter!(
-        "mg_worker_cb_transitions_total",
+        "modelpointer_worker_cb_transitions_total",
         "Circuit breaker state transitions by worker, from, to"
     );
     describe_gauge!(
-        "mg_worker_cb_consecutive_failures",
+        "modelpointer_worker_cb_consecutive_failures",
         "Current consecutive failure count per worker"
     );
     describe_gauge!(
-        "mg_worker_cb_consecutive_successes",
+        "modelpointer_worker_cb_consecutive_successes",
         "Current consecutive success count per worker"
     );
 
     // Layer 6: Worker pool
     describe_gauge!(
-        "mg_worker_pool_total",
+        "modelpointer_worker_pool_total",
         "Total registered workers by model"
     );
     describe_gauge!(
-        "mg_worker_available_total",
+        "modelpointer_worker_available_total",
         "Available workers (circuit not open) by model"
     );
 
     // Layer 7: Token usage (TPOT only; per-key token counters are in the access log)
     describe_histogram!(
-        "mg_upstream_tpot_ms",
+        "modelpointer_upstream_tpot_ms",
         "Time per output token for streaming requests (ms/token) by model and provider"
     );
 }
@@ -346,7 +345,7 @@ impl Metrics {
     pub fn record_http_request(method: &'static str, path: &str) {
         let path_interned = intern_string(path);
         counter!(
-            "mg_http_requests_total",
+            "modelpointer_http_requests_total",
             "method" => method,
             "path" => path_interned,
         )
@@ -357,7 +356,7 @@ impl Metrics {
         let status_str: Cow<'static, str> = status_code_to_cow(status_code);
         let error_interned = intern_string(error_code);
         counter!(
-            "mg_http_responses_total",
+            "modelpointer_http_responses_total",
             "status_code" => status_str,
             "error_code" => error_interned
         )
@@ -371,7 +370,7 @@ impl Metrics {
     pub fn record_gateway_request(model_id: &str, endpoint: &'static str, streaming: &'static str) {
         let model = intern_string(model_id);
         counter!(
-            "mg_gateway_requests_total",
+            "modelpointer_gateway_requests_total",
             "model" => model,
             "endpoint" => endpoint,
             "streaming" => streaming
@@ -382,21 +381,17 @@ impl Metrics {
     pub fn record_gateway_duration(model_id: &str, endpoint: &'static str, duration: Duration) {
         let model = intern_string(model_id);
         histogram!(
-            "mg_gateway_duration_seconds",
+            "modelpointer_gateway_duration_seconds",
             "model" => model,
             "endpoint" => endpoint
         )
         .record(duration.as_secs_f64());
     }
 
-    pub fn record_gateway_error(
-        model_id: &str,
-        endpoint: &'static str,
-        error_type: &'static str,
-    ) {
+    pub fn record_gateway_error(model_id: &str, endpoint: &'static str, error_type: &'static str) {
         let model = intern_string(model_id);
         counter!(
-            "mg_gateway_errors_total",
+            "modelpointer_gateway_errors_total",
             "model" => model,
             "endpoint" => endpoint,
             "error_type" => error_type
@@ -413,7 +408,7 @@ impl Metrics {
         let provider_interned = intern_string(provider);
         let status_str: Cow<'static, str> = status_code_to_cow(status_code);
         counter!(
-            "mg_upstream_requests_total",
+            "modelpointer_upstream_requests_total",
             "model" => model,
             "provider" => provider_interned,
             "status_code" => status_str
@@ -425,7 +420,7 @@ impl Metrics {
         let model = intern_string(model_id);
         let provider_interned = intern_string(provider);
         histogram!(
-            "mg_upstream_duration_seconds",
+            "modelpointer_upstream_duration_seconds",
             "model" => model,
             "provider" => provider_interned
         )
@@ -436,7 +431,7 @@ impl Metrics {
         let model = intern_string(model_id);
         let provider_interned = intern_string(provider);
         histogram!(
-            "mg_upstream_ttft_seconds",
+            "modelpointer_upstream_ttft_seconds",
             "model" => model,
             "provider" => provider_interned
         )
@@ -451,7 +446,7 @@ impl Metrics {
         let model = intern_string(model_id);
         let status_str: Cow<'static, str> = status_code_to_cow(status_code);
         counter!(
-            "mg_retry_attempts_total",
+            "modelpointer_retry_attempts_total",
             "model" => model,
             "endpoint" => endpoint,
             "status_code" => status_str
@@ -462,7 +457,7 @@ impl Metrics {
     pub fn record_retry_exhausted(model_id: &str, endpoint: &'static str) {
         let model = intern_string(model_id);
         counter!(
-            "mg_retry_exhausted_total",
+            "modelpointer_retry_exhausted_total",
             "model" => model,
             "endpoint" => endpoint
         )
@@ -476,7 +471,7 @@ impl Metrics {
     pub fn set_worker_cb_state(worker: &str, state_code: u8) {
         let worker_interned = intern_string(worker);
         gauge!(
-            "mg_worker_cb_state",
+            "modelpointer_worker_cb_state",
             "worker" => worker_interned
         )
         .set(state_code as f64);
@@ -485,7 +480,7 @@ impl Metrics {
     pub fn record_worker_cb_transition(worker: &str, from: &'static str, to: &'static str) {
         let worker_interned = intern_string(worker);
         counter!(
-            "mg_worker_cb_transitions_total",
+            "modelpointer_worker_cb_transitions_total",
             "worker" => worker_interned,
             "from" => from,
             "to" => to
@@ -496,7 +491,7 @@ impl Metrics {
     pub fn set_worker_cb_consecutive_failures(worker: &str, count: u32) {
         let worker_interned = intern_string(worker);
         gauge!(
-            "mg_worker_cb_consecutive_failures",
+            "modelpointer_worker_cb_consecutive_failures",
             "worker" => worker_interned
         )
         .set(count as f64);
@@ -505,7 +500,7 @@ impl Metrics {
     pub fn set_worker_cb_consecutive_successes(worker: &str, count: u32) {
         let worker_interned = intern_string(worker);
         gauge!(
-            "mg_worker_cb_consecutive_successes",
+            "modelpointer_worker_cb_consecutive_successes",
             "worker" => worker_interned
         )
         .set(count as f64);
@@ -518,7 +513,7 @@ impl Metrics {
     pub fn set_worker_pool_total(model_id: &str, count: usize) {
         let model = intern_string(model_id);
         gauge!(
-            "mg_worker_pool_total",
+            "modelpointer_worker_pool_total",
             "model" => model
         )
         .set(count as f64);
@@ -527,7 +522,7 @@ impl Metrics {
     pub fn set_worker_available_total(model_id: &str, count: usize) {
         let model = intern_string(model_id);
         gauge!(
-            "mg_worker_available_total",
+            "modelpointer_worker_available_total",
             "model" => model
         )
         .set(count as f64);
@@ -542,7 +537,7 @@ impl Metrics {
         let model = intern_string(model_id);
         let provider_interned = intern_string(provider);
         histogram!(
-            "mg_upstream_tpot_ms",
+            "modelpointer_upstream_tpot_ms",
             "model" => model,
             "provider" => provider_interned
         )
@@ -555,10 +550,12 @@ impl Metrics {
 
     pub fn remove_worker_metrics(worker_url: &str) {
         let worker = intern_string(worker_url);
-        gauge!("mg_worker_cb_consecutive_failures", "worker" => Arc::clone(&worker)).set(0.0);
-        gauge!("mg_worker_cb_consecutive_successes", "worker" => Arc::clone(&worker)).set(0.0);
+        gauge!("modelpointer_worker_cb_consecutive_failures", "worker" => Arc::clone(&worker))
+            .set(0.0);
+        gauge!("modelpointer_worker_cb_consecutive_successes", "worker" => Arc::clone(&worker))
+            .set(0.0);
         // -1 signals "removed" until metrics-rs supports deletion
-        gauge!("mg_worker_cb_state", "worker" => worker).set(-1.0);
+        gauge!("modelpointer_worker_cb_state", "worker" => worker).set(-1.0);
     }
 }
 
@@ -624,7 +621,7 @@ mod tests {
     #[test]
     fn test_interner_size_grows() {
         let initial_size = interner_size();
-        let unique = format!("unique_test_string_{}", initial_size);
+        let unique = format!("unique_test_string_{initial_size}");
         intern_string(&unique);
         assert!(interner_size() > initial_size);
     }

@@ -11,8 +11,8 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use sqlx::{AnyPool, Row};
 
-use modelpointer_core::storage::{ApiKeyLookupResult, ApiKeyRepository};
 use crate::db::DatabaseDialect;
+use modelpointer_core::storage::{ApiKeyLookupResult, ApiKeyRepository};
 
 // =============================================================================
 // SQL implementation
@@ -34,6 +34,17 @@ impl SqlApiKeyRepository {
     }
 
     /// Fetch all currently active, non-expired keys for bulk cache loading.
+    ///
+    /// NOTE (cache/version coupling): the active-key set is currently assumed to
+    /// change only through admin mutations, each of which bumps the `api_keys`
+    /// config version so the gateway's cached repository reloads. This holds
+    /// because `api_keys.expires_at` is never populated today (always NULL), so
+    /// the `expires_at > CURRENT_TIMESTAMP` filter below has no time-driven
+    /// effect. If a key-expiry feature is ever added (populating `expires_at`),
+    /// natural expiry would NOT bump the version, so a version-gated reload would
+    /// keep an expired key cached until the next forced reload. In that case,
+    /// make `CachedApiKeyRepository` expiry-aware (store `expires_at` and check
+    /// it on lookup) or drop version-gating for api_keys.
     pub async fn find_all_active(&self) -> Result<Vec<(String, ApiKeyLookupResult)>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, uid, key_hash \

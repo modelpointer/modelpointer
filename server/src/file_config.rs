@@ -48,8 +48,8 @@
 //!             weight: 1
 //! ```
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use std::sync::atomic::AtomicBool;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use serde::Deserialize;
 
@@ -226,7 +226,6 @@ impl FileConfigSource {
     }
 }
 
-
 // ── Build endpoint lookup table ───────────────────────────────────────────────
 
 /// Resolves all provider regions into a flat lookup table keyed by "provider.region".
@@ -237,10 +236,14 @@ fn resolve_endpoints(
     let mut table: HashMap<String, Vec<ResolvedEndpoint>> = HashMap::new();
 
     for (provider_name, provider) in providers {
-        let api_key = provider.api_key.as_ref().map(|k| expand_env(k)).transpose()?;
+        let api_key = provider
+            .api_key
+            .as_ref()
+            .map(|k| expand_env(k))
+            .transpose()?;
 
         for (region_name, region) in &provider.regions {
-            let key = format!("{}.{}", provider_name, region_name);
+            let key = format!("{provider_name}.{region_name}");
             let mut endpoints = Vec::new();
 
             if let Some(ep) = &region.openai {
@@ -264,8 +267,7 @@ fn resolve_endpoints(
 
             if endpoints.is_empty() {
                 return Err(format!(
-                    "Upstream '{}.{}' has no endpoints (add 'openai' or 'anthropic' section)",
-                    provider_name, region_name
+                    "Upstream '{provider_name}.{region_name}' has no endpoints (add 'openai' or 'anthropic' section)"
                 ));
             }
 
@@ -283,11 +285,18 @@ fn resolve_providers(
     let mut table: HashMap<String, ResolvedProvider> = HashMap::new();
 
     for (provider_name, provider) in providers {
-        let api_key = provider.api_key.as_ref().map(|k| expand_env(k)).transpose()?;
-        table.insert(provider_name.clone(), ResolvedProvider {
-            api_key,
-            provider_type: provider.provider_type.clone(),
-        });
+        let api_key = provider
+            .api_key
+            .as_ref()
+            .map(|k| expand_env(k))
+            .transpose()?;
+        table.insert(
+            provider_name.clone(),
+            ResolvedProvider {
+                api_key,
+                provider_type: provider.provider_type.clone(),
+            },
+        );
     }
 
     Ok(table)
@@ -314,12 +323,20 @@ fn add_tier_bindings(
     bindings: &mut Vec<UpstreamBinding>,
 ) -> Result<(), String> {
     for up_ref in upstreams {
-        if up_ref.disabled { continue; }
+        if up_ref.disabled {
+            continue;
+        }
         let weight = up_ref.weight.unwrap_or(1);
         let key = format!("{}.{}", up_ref.provider, up_ref.region);
         let eps = lookup_endpoints(&key, table, compat.clone())?;
         for ep in eps {
-            bindings.push(make_binding(ep, strategy, weight, up_ref.upstream_model.clone(), priority)?);
+            bindings.push(make_binding(
+                ep,
+                strategy,
+                weight,
+                up_ref.upstream_model.clone(),
+                priority,
+            )?);
         }
     }
     Ok(())
@@ -342,23 +359,52 @@ fn build_groups(
 
             if proto.primary.is_some() || proto.fallback.is_some() {
                 if let Some(tier) = &proto.primary {
-                    add_tier_bindings(&tier.upstreams, ApiCompatibility::OpenAi, strategy, 0, table, &mut bindings)?;
+                    add_tier_bindings(
+                        &tier.upstreams,
+                        ApiCompatibility::OpenAi,
+                        strategy,
+                        0,
+                        table,
+                        &mut bindings,
+                    )?;
                 }
                 if let Some(tier) = &proto.fallback {
-                    add_tier_bindings(&tier.upstreams, ApiCompatibility::OpenAi, strategy, 1, table, &mut bindings)?;
+                    add_tier_bindings(
+                        &tier.upstreams,
+                        ApiCompatibility::OpenAi,
+                        strategy,
+                        1,
+                        table,
+                        &mut bindings,
+                    )?;
                 }
             } else {
-                add_tier_bindings(&proto.upstreams, ApiCompatibility::OpenAi, strategy, 0, table, &mut bindings)?;
+                add_tier_bindings(
+                    &proto.upstreams,
+                    ApiCompatibility::OpenAi,
+                    strategy,
+                    0,
+                    table,
+                    &mut bindings,
+                )?;
             }
 
             if !bindings.is_empty() {
                 any_bindings = true;
-                let capacity = proto.primary.as_ref()
+                let capacity = proto
+                    .primary
+                    .as_ref()
                     .map(|t| (t.capacity_rpm, t.capacity_tpm))
                     .unwrap_or((None, None));
-                let model_card = ModelCard::new(route.model.clone()).with_aliases(route.aliases.clone());
+                let model_card =
+                    ModelCard::new(route.model.clone()).with_aliases(route.aliases.clone());
                 let group = UpstreamGroup::new(model_card, strategy, bindings)?
-                    .with_rate_limits(route.key_rpm, route.key_tpm, route.model_rpm, route.model_tpm)
+                    .with_rate_limits(
+                        route.key_rpm,
+                        route.key_tpm,
+                        route.model_rpm,
+                        route.model_tpm,
+                    )
                     .with_primary_capacity(capacity.0, capacity.1);
                 groups.push(group);
             }
@@ -370,23 +416,52 @@ fn build_groups(
 
             if proto.primary.is_some() || proto.fallback.is_some() {
                 if let Some(tier) = &proto.primary {
-                    add_tier_bindings(&tier.upstreams, ApiCompatibility::Anthropic, strategy, 0, table, &mut bindings)?;
+                    add_tier_bindings(
+                        &tier.upstreams,
+                        ApiCompatibility::Anthropic,
+                        strategy,
+                        0,
+                        table,
+                        &mut bindings,
+                    )?;
                 }
                 if let Some(tier) = &proto.fallback {
-                    add_tier_bindings(&tier.upstreams, ApiCompatibility::Anthropic, strategy, 1, table, &mut bindings)?;
+                    add_tier_bindings(
+                        &tier.upstreams,
+                        ApiCompatibility::Anthropic,
+                        strategy,
+                        1,
+                        table,
+                        &mut bindings,
+                    )?;
                 }
             } else {
-                add_tier_bindings(&proto.upstreams, ApiCompatibility::Anthropic, strategy, 0, table, &mut bindings)?;
+                add_tier_bindings(
+                    &proto.upstreams,
+                    ApiCompatibility::Anthropic,
+                    strategy,
+                    0,
+                    table,
+                    &mut bindings,
+                )?;
             }
 
             if !bindings.is_empty() {
                 any_bindings = true;
-                let capacity = proto.primary.as_ref()
+                let capacity = proto
+                    .primary
+                    .as_ref()
                     .map(|t| (t.capacity_rpm, t.capacity_tpm))
                     .unwrap_or((None, None));
-                let model_card = ModelCard::new(route.model.clone()).with_aliases(route.aliases.clone());
+                let model_card =
+                    ModelCard::new(route.model.clone()).with_aliases(route.aliases.clone());
                 let group = UpstreamGroup::new(model_card, strategy, bindings)?
-                    .with_rate_limits(route.key_rpm, route.key_tpm, route.model_rpm, route.model_tpm)
+                    .with_rate_limits(
+                        route.key_rpm,
+                        route.key_tpm,
+                        route.model_rpm,
+                        route.model_tpm,
+                    )
                     .with_primary_capacity(capacity.0, capacity.1);
                 groups.push(group);
             }
@@ -397,7 +472,9 @@ fn build_groups(
             let mut bindings: Vec<UpstreamBinding> = Vec::new();
 
             for up_ref in &proto.upstreams {
-                if up_ref.disabled { continue; }
+                if up_ref.disabled {
+                    continue;
+                }
                 let weight = up_ref.weight.unwrap_or(1);
 
                 let resolved_prov = provider_table.get(&up_ref.provider)
@@ -431,9 +508,14 @@ fn build_groups(
 
             if !bindings.is_empty() {
                 any_bindings = true;
-                let model_card = ModelCard::new(route.model.clone()).with_aliases(route.aliases.clone());
-                let group = UpstreamGroup::new(model_card, strategy, bindings)?
-                    .with_rate_limits(route.key_rpm, route.key_tpm, route.model_rpm, route.model_tpm);
+                let model_card =
+                    ModelCard::new(route.model.clone()).with_aliases(route.aliases.clone());
+                let group = UpstreamGroup::new(model_card, strategy, bindings)?.with_rate_limits(
+                    route.key_rpm,
+                    route.key_tpm,
+                    route.model_rpm,
+                    route.model_tpm,
+                );
                 groups.push(group);
             }
         }
@@ -456,17 +538,16 @@ fn lookup_endpoints<'a>(
     table: &'a HashMap<String, Vec<ResolvedEndpoint>>,
     compat: ApiCompatibility,
 ) -> Result<impl Iterator<Item = &'a ResolvedEndpoint>, String> {
-    let all = table.get(name)
-        .ok_or_else(|| format!("Upstream '{}' not found — check your upstreams config", name))?;
+    let all = table
+        .get(name)
+        .ok_or_else(|| format!("Upstream '{name}' not found — check your upstreams config"))?;
 
-    let matched: Vec<&ResolvedEndpoint> = all.iter()
-        .filter(|ep| ep.compatibility == compat)
-        .collect();
+    let matched: Vec<&ResolvedEndpoint> =
+        all.iter().filter(|ep| ep.compatibility == compat).collect();
 
     if matched.is_empty() {
         return Err(format!(
-            "Upstream '{}' has no {} endpoint defined",
-            name, compat
+            "Upstream '{name}' has no {compat} endpoint defined"
         ));
     }
 
@@ -565,7 +646,8 @@ routes:
 
     #[test]
     fn flat_format_weight_defaults_to_one() {
-        let yaml = upstream_block("p", "r", "http://x") + r#"
+        let yaml = upstream_block("p", "r", "http://x")
+            + r#"
 routes:
   - model: "m"
     openai:
@@ -656,8 +738,16 @@ routes:
         let out = load(yaml).unwrap();
         let g = &out.groups[0];
         assert_eq!(g.upstreams.len(), 2);
-        let primary = g.upstreams.iter().find(|b| b.base_url() == "http://primary").unwrap();
-        let fallback = g.upstreams.iter().find(|b| b.base_url() == "http://fallback").unwrap();
+        let primary = g
+            .upstreams
+            .iter()
+            .find(|b| b.base_url() == "http://primary")
+            .unwrap();
+        let fallback = g
+            .upstreams
+            .iter()
+            .find(|b| b.base_url() == "http://fallback")
+            .unwrap();
         assert_eq!(primary.priority, 0);
         assert_eq!(fallback.priority, 1);
     }
@@ -697,7 +787,8 @@ routes:
 
     #[test]
     fn rate_limits_are_propagated_to_group() {
-        let yaml = upstream_block("p", "r", "http://x") + r#"
+        let yaml = upstream_block("p", "r", "http://x")
+            + r#"
 routes:
   - model: "m"
     key_rpm: 100
@@ -756,7 +847,10 @@ routes:
             "upstreams:\n  p:\n    api_key: \"${{{var}}}\"\n    regions:\n      r:\n        openai:\n          base_url: \"http://x\"\n\nroutes:\n  - model: m\n    openai:\n      upstreams: [{{provider: p, region: r}}]\n"
         );
         let out = load(&yaml).unwrap();
-        assert_eq!(out.groups[0].upstreams[0].api_key(), &Some("sk-secret".to_string()));
+        assert_eq!(
+            out.groups[0].upstreams[0].api_key(),
+            &Some("sk-secret".to_string())
+        );
 
         unsafe { std::env::remove_var(&var) };
     }
@@ -770,7 +864,10 @@ routes:
             "upstreams:\n  p:\n    regions:\n      r:\n        openai:\n          base_url: \"${{{var}}}/v1\"\n\nroutes:\n  - model: m\n    openai:\n      upstreams: [{{provider: p, region: r}}]\n"
         );
         let out = load(&yaml).unwrap();
-        assert_eq!(out.groups[0].upstreams[0].base_url(), "http://dynamic-host/v1");
+        assert_eq!(
+            out.groups[0].upstreams[0].base_url(),
+            "http://dynamic-host/v1"
+        );
 
         unsafe { std::env::remove_var(&var) };
     }
@@ -779,7 +876,8 @@ routes:
 
     #[test]
     fn model_aliases_are_preserved() {
-        let yaml = upstream_block("p", "r", "http://x") + r#"
+        let yaml = upstream_block("p", "r", "http://x")
+            + r#"
 routes:
   - model: "gpt-4o"
     aliases: ["gpt4o", "gpt-4-omni"]
@@ -797,7 +895,8 @@ routes:
 
     #[test]
     fn upstream_model_name_override_is_loaded() {
-        let yaml = upstream_block("p", "r", "http://x") + r#"
+        let yaml = upstream_block("p", "r", "http://x")
+            + r#"
 routes:
   - model: "qwen3-plus"
     openai:
@@ -836,7 +935,11 @@ routes:
           region: eu
 "#;
         let out = load(yaml).unwrap();
-        let urls: Vec<_> = out.groups[0].upstreams.iter().map(|b| b.base_url()).collect();
+        let urls: Vec<_> = out.groups[0]
+            .upstreams
+            .iter()
+            .map(|b| b.base_url())
+            .collect();
         assert!(urls.contains(&"http://us"));
         assert!(urls.contains(&"http://eu"));
     }
@@ -890,7 +993,10 @@ routes:
         let g = &out.groups[0];
         assert_eq!(g.model.id, "gte-rerank");
         let b = &g.upstreams[0];
-        assert_eq!(b.base_url(), "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank");
+        assert_eq!(
+            b.base_url(),
+            "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+        );
         assert_eq!(b.api_key(), &Some("sk-dashscope".to_string()));
         assert!(matches!(b.api_compatibility(), ApiCompatibility::Native));
         assert!(matches!(b.provider_type(), ProviderType::Aliyun));
@@ -914,7 +1020,10 @@ routes:
 "#;
         let out = load(yaml).unwrap();
         assert_eq!(out.groups[0].model.id, "rerank-english");
-        assert!(matches!(out.groups[0].upstreams[0].api_compatibility(), ApiCompatibility::Native));
+        assert!(matches!(
+            out.groups[0].upstreams[0].api_compatibility(),
+            ApiCompatibility::Native
+        ));
     }
 
     #[test]
@@ -944,24 +1053,46 @@ routes:
 "#;
         let out = load(yaml).unwrap();
         assert_eq!(out.groups.len(), 2);
-        let chat = out.groups.iter().find(|g| g.model.id == "qwen-turbo").unwrap();
-        let rerank = out.groups.iter().find(|g| g.model.id == "gte-rerank").unwrap();
-        assert!(matches!(chat.upstreams[0].api_compatibility(), ApiCompatibility::OpenAi));
-        assert!(matches!(rerank.upstreams[0].api_compatibility(), ApiCompatibility::Native));
+        let chat = out
+            .groups
+            .iter()
+            .find(|g| g.model.id == "qwen-turbo")
+            .unwrap();
+        let rerank = out
+            .groups
+            .iter()
+            .find(|g| g.model.id == "gte-rerank")
+            .unwrap();
+        assert!(matches!(
+            chat.upstreams[0].api_compatibility(),
+            ApiCompatibility::OpenAi
+        ));
+        assert!(matches!(
+            rerank.upstreams[0].api_compatibility(),
+            ApiCompatibility::Native
+        ));
     }
 
     // ── Error cases ───────────────────────────────────────────────────────────
 
     #[test]
     fn missing_file_returns_error() {
-        let err = FileConfigSource::new("/tmp/tp-nonexistent-config.yaml").load().unwrap_err();
-        assert!(err.contains("Failed to read config"), "unexpected error: {err}");
+        let err = FileConfigSource::new("/tmp/tp-nonexistent-config.yaml")
+            .load()
+            .unwrap_err();
+        assert!(
+            err.contains("Failed to read config"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn malformed_yaml_returns_error() {
         let err = load("{ not: valid: yaml:").unwrap_err();
-        assert!(err.contains("Config parse error"), "unexpected error: {err}");
+        assert!(
+            err.contains("Config parse error"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -971,19 +1102,26 @@ routes:
             "upstreams:\n  p:\n    api_key: \"${{{var}}}\"\n    regions:\n      r:\n        openai:\n          base_url: \"http://x\"\n\nroutes:\n  - model: m\n    openai:\n      upstreams: [{{provider: p, region: r}}]\n"
         );
         let err = load(&yaml).unwrap_err();
-        assert!(err.contains("not set") || err.contains(&var), "unexpected error: {err}");
+        assert!(
+            err.contains("not set") || err.contains(&var),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn unknown_upstream_ref_returns_error() {
-        let yaml = upstream_block("p", "r", "http://x") + r#"
+        let yaml = upstream_block("p", "r", "http://x")
+            + r#"
 routes:
   - model: "m"
     openai:
       upstreams: [{provider: p, region: nonexistent}]
 "#;
         let err = load(&yaml).unwrap_err();
-        assert!(err.contains("p.nonexistent") || err.contains("not found"), "unexpected error: {err}");
+        assert!(
+            err.contains("p.nonexistent") || err.contains("not found"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1002,7 +1140,10 @@ routes:
       upstreams: [{provider: p, region: r}]
 "#;
         let err = load(yaml).unwrap_err();
-        assert!(err.contains("no openai endpoint") || err.contains("p.r"), "unexpected error: {err}");
+        assert!(
+            err.contains("no openai endpoint") || err.contains("p.r"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1025,7 +1166,8 @@ routes:
 
     #[test]
     fn all_upstreams_disabled_returns_error() {
-        let yaml = upstream_block("p", "r", "http://x") + r#"
+        let yaml = upstream_block("p", "r", "http://x")
+            + r#"
 routes:
   - model: "m"
     openai:
@@ -1035,7 +1177,10 @@ routes:
           disabled: true
 "#;
         let err = load(&yaml).unwrap_err();
-        assert!(err.contains("no active upstreams") || err.contains("disabled"), "unexpected error: {err}");
+        assert!(
+            err.contains("no active upstreams") || err.contains("disabled"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1079,6 +1224,9 @@ routes:
           url: "https://example.com/rerank"
 "#;
         let err = load(yaml).unwrap_err();
-        assert!(err.contains("nonexistent") || err.contains("not found"), "unexpected error: {err}");
+        assert!(
+            err.contains("nonexistent") || err.contains("not found"),
+            "unexpected error: {err}"
+        );
     }
 }

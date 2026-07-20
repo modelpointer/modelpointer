@@ -5,8 +5,8 @@
 //! - **WeightedHash** — consistent hashing with weighted scores; good for session affinity.
 
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use serde::{Deserialize, Serialize};
@@ -48,7 +48,10 @@ impl RoutingStrategyConfig {
 
     pub fn validate(&self) -> Result<(), String> {
         if self.weight() == 0 {
-            Err(format!("{:?} upstream weight must be greater than 0", self.strategy()))
+            Err(format!(
+                "{:?} upstream weight must be greater than 0",
+                self.strategy()
+            ))
         } else {
             Ok(())
         }
@@ -89,7 +92,11 @@ pub fn select_swrr(
         .enumerate()
         .fold((0usize, i64::MIN), |(best_idx, best_cw), (i, c)| {
             let cw = c.current_weight.load(Ordering::Relaxed);
-            if cw > best_cw { (i, cw) } else { (best_idx, best_cw) }
+            if cw > best_cw {
+                (i, cw)
+            } else {
+                (best_idx, best_cw)
+            }
         })
         .0;
 
@@ -120,13 +127,17 @@ pub fn select_weighted_hash(
 
     let computed_key = routing_key.map(str::to_owned).unwrap_or_else(|| {
         let n = cursor.fetch_add(1, Ordering::Relaxed);
-        format!("{}:{}", model_id, n)
+        format!("{model_id}:{n}")
     });
 
     candidates
         .iter()
         .map(|binding| {
-            let score = weighted_hash_score(&computed_key, binding.base_url(), binding.strategy_config.weight());
+            let score = weighted_hash_score(
+                &computed_key,
+                binding.base_url(),
+                binding.strategy_config.weight(),
+            );
             ((*binding).clone() as Arc<dyn Upstream>, score)
         })
         .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
@@ -134,7 +145,7 @@ pub fn select_weighted_hash(
 }
 
 fn weighted_hash_score(routing_key: &str, upstream_identity: &str, weight: u8) -> f64 {
-    let hash = blake3::hash(format!("{}:{}", routing_key, upstream_identity).as_bytes());
+    let hash = blake3::hash(format!("{routing_key}:{upstream_identity}").as_bytes());
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&hash.as_bytes()[..8]);
     let raw = u64::from_le_bytes(bytes);
@@ -152,8 +163,8 @@ mod tests {
         upstream::{
             circuit_breaker::CircuitBreaker,
             node::{
-                ApiCompatibility, RuntimeType, UpstreamCredential, UpstreamNode, UpstreamProfile,
-                ProviderType,
+                ApiCompatibility, ProviderType, RuntimeType, UpstreamCredential, UpstreamNode,
+                UpstreamProfile,
             },
         },
     };
@@ -163,6 +174,7 @@ mod tests {
             node: UpstreamNode {
                 profile: UpstreamProfile {
                     base_url: url.to_string(),
+                    provider_node_id: String::new(),
                     api_compatibility: ApiCompatibility::OpenAi,
                     runtime_type: RuntimeType::External,
                     upstream_model_name: None,
@@ -248,16 +260,34 @@ mod tests {
 
     #[test]
     fn routing_strategy_config_validation() {
-        assert!(RoutingStrategyConfig::Swrr { weight: 0 }.validate().is_err());
+        assert!(
+            RoutingStrategyConfig::Swrr { weight: 0 }
+                .validate()
+                .is_err()
+        );
         assert!(RoutingStrategyConfig::Swrr { weight: 1 }.validate().is_ok());
-        assert!(RoutingStrategyConfig::WeightedHash { weight: 0 }.validate().is_err());
-        assert!(RoutingStrategyConfig::WeightedHash { weight: 1 }.validate().is_ok());
+        assert!(
+            RoutingStrategyConfig::WeightedHash { weight: 0 }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            RoutingStrategyConfig::WeightedHash { weight: 1 }
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
     fn routing_strategy_config_returns_correct_strategy() {
-        assert_eq!(RoutingStrategyConfig::Swrr { weight: 1 }.strategy(), RoutingStrategy::Swrr);
-        assert_eq!(RoutingStrategyConfig::WeightedHash { weight: 1 }.strategy(), RoutingStrategy::WeightedHash);
+        assert_eq!(
+            RoutingStrategyConfig::Swrr { weight: 1 }.strategy(),
+            RoutingStrategy::Swrr
+        );
+        assert_eq!(
+            RoutingStrategyConfig::WeightedHash { weight: 1 }.strategy(),
+            RoutingStrategy::WeightedHash
+        );
     }
 
     #[test]

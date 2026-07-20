@@ -7,23 +7,23 @@ use super::DatabaseDialect;
 
 #[derive(Debug, Clone)]
 pub struct AccessLogRecord {
-    pub ts:                DateTime<Utc>,
-    pub request_id:        String,
-    pub api_key_id:        String,
-    pub model:             String,
-    pub endpoint:          String,
-    pub provider_url:      String,
-    pub provider_node_id:  String,
-    pub upstream_model:    String,
-    pub status_code:       u16,
-    pub latency_ms:        u64,
-    pub streaming:         bool,
-    pub ttft_ms:           u64,
-    pub tpot_ms:           f64,
-    pub prompt_tokens:     u32,
+    pub ts: DateTime<Utc>,
+    pub request_id: String,
+    pub api_key_id: String,
+    pub model: String,
+    pub endpoint: String,
+    pub provider_url: String,
+    pub provider_node_id: String,
+    pub upstream_model: String,
+    pub status_code: u16,
+    pub latency_ms: u64,
+    pub streaming: bool,
+    pub ttft_ms: u64,
+    pub tpot_ms: f64,
+    pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    pub total_tokens:      u32,
-    pub finish_reason:     String,
+    pub total_tokens: u32,
+    pub finish_reason: String,
 }
 
 // ── Migration ─────────────────────────────────────────────────────────────────
@@ -38,12 +38,12 @@ pub async fn migrate(pool: &AnyPool, dialect: DatabaseDialect) -> Result<(), sql
 /// SQLite / MySQL: plain table with index on ts.
 async fn migrate_simple(pool: &AnyPool, dialect: DatabaseDialect) -> Result<(), sqlx::Error> {
     let id_col = match dialect {
-        DatabaseDialect::MySql  => "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
+        DatabaseDialect::MySql => "id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY",
         DatabaseDialect::Sqlite => "id INTEGER PRIMARY KEY AUTOINCREMENT",
         DatabaseDialect::Postgres => unreachable!(),
     };
     let ts_col = match dialect {
-        DatabaseDialect::MySql  => "ts TIMESTAMP(6) NOT NULL",
+        DatabaseDialect::MySql => "ts TIMESTAMP(6) NOT NULL",
         DatabaseDialect::Sqlite => "ts TEXT         NOT NULL",
         DatabaseDialect::Postgres => unreachable!(),
     };
@@ -77,12 +77,14 @@ async fn migrate_simple(pool: &AnyPool, dialect: DatabaseDialect) -> Result<(), 
         .await?;
 
     // Add columns to existing tables (ignore error if column already exists).
-    let _ = sqlx::query("ALTER TABLE access_log ADD COLUMN upstream_model TEXT NOT NULL DEFAULT ''")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE access_log ADD COLUMN provider_node_id TEXT NOT NULL DEFAULT ''")
-        .execute(pool)
-        .await;
+    let _ =
+        sqlx::query("ALTER TABLE access_log ADD COLUMN upstream_model TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await;
+    let _ =
+        sqlx::query("ALTER TABLE access_log ADD COLUMN provider_node_id TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await;
 
     Ok(())
 }
@@ -145,11 +147,9 @@ async fn migrate_pg(pool: &AnyPool) -> Result<(), sqlx::Error> {
     .await?;
 
     // Global index on ts (automatically inherited by child partitions).
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_access_log_ts ON access_log (ts)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_access_log_ts ON access_log (ts)")
+        .execute(pool)
+        .await?;
 
     // Pre-create today + 3 days ahead.
     ensure_pg_partitions(pool, 3).await?;
@@ -170,13 +170,12 @@ pub async fn ensure_pg_partitions(pool: &AnyPool, days_ahead: u32) -> Result<(),
     Ok(())
 }
 
-async fn create_pg_partition(
-    pool: &AnyPool,
-    date: chrono::NaiveDate,
-) -> Result<(), sqlx::Error> {
-    let name  = pg_partition_name(date);
+async fn create_pg_partition(pool: &AnyPool, date: chrono::NaiveDate) -> Result<(), sqlx::Error> {
+    let name = pg_partition_name(date);
     let start = date.format("%Y-%m-%d 00:00:00+00").to_string();
-    let end   = (date + chrono::Duration::days(1)).format("%Y-%m-%d 00:00:00+00").to_string();
+    let end = (date + chrono::Duration::days(1))
+        .format("%Y-%m-%d 00:00:00+00")
+        .to_string();
 
     // IF NOT EXISTS on CREATE TABLE ... PARTITION OF is available in PG 11+.
     sqlx::query(&format!(
@@ -252,7 +251,7 @@ pub async fn delete_older_than(
 ) -> Result<u64, sqlx::Error> {
     let cutoff_str = match dialect {
         DatabaseDialect::MySql => cutoff.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
-        _                      => cutoff.to_rfc3339(),
+        _ => cutoff.to_rfc3339(),
     };
     let result = sqlx::query("DELETE FROM access_log WHERE ts < ?")
         .bind(cutoff_str)
@@ -278,8 +277,9 @@ pub async fn insert_batch(pool: &AnyPool, dialect: DatabaseDialect, records: &[A
             .enumerate()
             .map(|(i, _)| {
                 let start = i * COLS + 1;
-                let mut cols: Vec<String> = (start..start + COLS).map(|n| format!("${n}")).collect();
-                cols[0] = format!("${}::timestamptz", start); // ts needs explicit cast
+                let mut cols: Vec<String> =
+                    (start..start + COLS).map(|n| format!("${n}")).collect();
+                cols[0] = format!("${start}::timestamptz"); // ts needs explicit cast
                 format!("({})", cols.join(","))
             })
             .collect::<Vec<_>>()
@@ -305,13 +305,11 @@ pub async fn insert_batch(pool: &AnyPool, dialect: DatabaseDialect, records: &[A
         // AnyPool does not implement Encode for DateTime<Utc>; format as a
         // dialect-appropriate string instead.
         let ts_str = match dialect {
-            DatabaseDialect::MySql =>
-                r.ts.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+            DatabaseDialect::MySql => r.ts.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
             // Fixed millisecond precision + "+00:00" offset so SQLite text values
             // sort lexicographically *and* match the query bounds exactly (the
             // admin side normalizes incoming bounds to the same canonical form).
-            _ =>
-                r.ts.to_rfc3339_opts(SecondsFormat::Millis, false),
+            _ => r.ts.to_rfc3339_opts(SecondsFormat::Millis, false),
         };
         q = q
             .bind(ts_str)

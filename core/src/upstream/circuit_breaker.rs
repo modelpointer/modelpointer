@@ -7,7 +7,7 @@
 // SGLang project (https://github.com/sgl-project/sglang).
 
 use std::{
-    sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering},
+    sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 

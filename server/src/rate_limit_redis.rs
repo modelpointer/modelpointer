@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use redis::{aio::ConnectionManager, Client, Script};
+use redis::{Client, Script, aio::ConnectionManager};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -71,11 +71,10 @@ pub struct RedisRateLimiter {
 
 impl RedisRateLimiter {
     pub async fn new(redis_url: &str, window_secs: u64) -> Result<Arc<Self>, String> {
-        let client =
-            Client::open(redis_url).map_err(|e| format!("Redis client error: {}", e))?;
+        let client = Client::open(redis_url).map_err(|e| format!("Redis client error: {e}"))?;
         let conn = ConnectionManager::new(client)
             .await
-            .map_err(|e| format!("Redis connect error: {}", e))?;
+            .map_err(|e| format!("Redis connect error: {e}"))?;
         Ok(Arc::new(Self {
             conn,
             window_ms: (window_secs * 1000) as i64,
@@ -91,28 +90,34 @@ impl RedisRateLimiter {
 
     fn rpm_key(key: &RateLimitKey) -> String {
         match key {
-            RateLimitKey::KeyModel { api_key_id, model_id } => {
-                format!("rl:key:{}:model:{}:rpm", api_key_id, model_id)
+            RateLimitKey::KeyModel {
+                api_key_id,
+                model_id,
+            } => {
+                format!("rl:key:{api_key_id}:model:{model_id}:rpm")
             }
             RateLimitKey::Model { model_id } => {
-                format!("rl:model:{}:rpm", model_id)
+                format!("rl:model:{model_id}:rpm")
             }
             RateLimitKey::PrimaryTier { model_id, protocol } => {
-                format!("rl:model:{}:proto:{}:primary:rpm", model_id, protocol)
+                format!("rl:model:{model_id}:proto:{protocol}:primary:rpm")
             }
         }
     }
 
     fn tpm_key(key: &RateLimitKey) -> String {
         match key {
-            RateLimitKey::KeyModel { api_key_id, model_id } => {
-                format!("rl:key:{}:model:{}:tpm", api_key_id, model_id)
+            RateLimitKey::KeyModel {
+                api_key_id,
+                model_id,
+            } => {
+                format!("rl:key:{api_key_id}:model:{model_id}:tpm")
             }
             RateLimitKey::Model { model_id } => {
-                format!("rl:model:{}:tpm", model_id)
+                format!("rl:model:{model_id}:tpm")
             }
             RateLimitKey::PrimaryTier { model_id, protocol } => {
-                format!("rl:model:{}:proto:{}:primary:tpm", model_id, protocol)
+                format!("rl:model:{model_id}:proto:{protocol}:primary:tpm")
             }
         }
     }

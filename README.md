@@ -2,6 +2,10 @@
 
 A high-performance AI gateway written in Rust. It sits in front of your LLM backends and exposes a unified API surface to clients, handling routing, load balancing, rate limiting, and observability.
 
+**[Documentation](https://modelpointer.github.io/modelpointer-docs/index.html)** · **[ModelPointer Commercial (Control Plane)](https://www.modelpointer.com)**
+
+> ModelPointer follows an **open-core** model. This repository is a complete, production-ready AI gateway — ideal for backend and platform engineers, SRE/DevOps, and AI infrastructure teams who prefer a config-driven, self-hosted gateway. On top of it, [ModelPointer Commercial](https://www.modelpointer.com) is an enterprise-grade LLM governance platform — a web console for visually managing routes, upstreams, API keys, and quota overrides, plus usage analytics, cost/chargeback dashboards, and user & application management. [Start a 30-day free trial →](https://modelpointer.com/contact?intent=trial)
+
 ## Features
 
 - **OpenAI and Anthropic protocol support** — `/v1/chat/completions`, `/v1/messages`, `/v1/embeddings`, `/v1/responses`
@@ -253,30 +257,30 @@ Authentication is via `Authorization: Bearer <key>`. Pass `--no-auth` to disable
 
 ### Responses API — required headers
 
-The `/v1/responses` family of endpoints requires an explicit `x-tp-provider` header that tells the gateway which upstream to target. Unlike chat completions, a Response object is stateful and lives on a specific provider's server, so the gateway cannot select an upstream automatically on retrieve / delete / input_items.
+The `/v1/responses` family of endpoints requires an explicit `x-mp-provider` header that tells the gateway which upstream to target. Unlike chat completions, a Response object is stateful and lives on a specific provider's server, so the gateway cannot select an upstream automatically on retrieve / delete / input_items.
 
 
 | Header             | Required | Description                                                                                                         |
 | ------------------ | -------- | ------------------------------------------------------------------------------------------------------------------- |
-| `x-tp-provider`    | **yes**  | Provider ID to route to, e.g. `openai.default` or `local-vllm.node-1`. Must match the `name` used in `routes.yaml`. |
-| `x-tp-routing-key` | no       | Sticky routing key for `weighted_hash` strategy. Falls back to the API key if omitted.                              |
+| `x-mp-provider`    | **yes**  | Provider ID to route to, e.g. `openai.default` or `local-vllm.node-1`. Must match the `name` used in `routes.yaml`. |
+| `x-mp-routing-key` | no       | Sticky routing key for `weighted_hash` strategy. Falls back to the API key if omitted.                              |
 
 
 ```bash
 # Create a response — gateway routes to the specified provider
 curl http://localhost:8080/v1/responses \
   -H "Authorization: Bearer $GATEWAY_KEY" \
-  -H "x-tp-provider: openai.default" \
+  -H "x-mp-provider: openai.default" \
   -H "Content-Type: application/json" \
   -d '{"model": "gpt-4o", "input": "Hello"}'
 
 # Retrieve — must specify the same provider that created the object
 curl http://localhost:8080/v1/responses/resp_abc123 \
   -H "Authorization: Bearer $GATEWAY_KEY" \
-  -H "x-tp-provider: openai.default"
+  -H "x-mp-provider: openai.default"
 ```
 
-If `x-tp-provider` is missing or does not match any configured upstream, the gateway returns `400 Bad Request`.
+If `x-mp-provider` is missing or does not match any configured upstream, the gateway returns `400 Bad Request`.
 
 ---
 
@@ -325,6 +329,8 @@ See `[examples/routes.example.yaml](examples/routes.example.yaml)` for a fully a
 ### Hot-reload
 
 In file mode, `routes.yaml`, `auth.yaml`, and `quota.yaml` are all monitored for changes and reloaded automatically — no restart required. The gateway polls each file's modification time every `--upstream-sync-interval-secs` seconds (default: 30). When a change is detected, the new config is applied atomically without dropping in-flight requests.
+
+In database mode, the gateway polls routes, API keys, and quota overrides every `--upstream-sync-interval-secs` seconds (default: 30). Each poll is a lightweight version check: the expensive full reload runs only when the admin plane has changed the corresponding config (tracked via a `config_versions` row). As a safety net, a full reload is also performed every `--force-reload-interval-secs` seconds (default: 3600) regardless of the version.
 
 
 | File          | What reloads                                                    |
@@ -435,7 +441,8 @@ modelpointer key list auth.yaml
 | `--otlp-traces-endpoint`        | `http://localhost:4318/v1/traces`    | OTLP endpoint                                    |
 | `--prometheus-port`             | `29000`                              | Prometheus metrics port                          |
 | `--request-timeout-secs`        | `30`                                 | Per-request upstream timeout                     |
-| `--upstream-sync-interval-secs` | `30`                                 | Database polling interval (database mode)        |
+| `--upstream-sync-interval-secs` | `30`                                 | Config version-check / file mtime poll interval  |
+| `--force-reload-interval-secs`  | `3600`                               | Database-mode full-reload safety net; `0` disables |
 | `--log-request-body`            | `false`                              | Log full request/response bodies in access log   |
 | `--no-inject-stream-usage`      | `false`                              | Disable auto-injection of `stream_options: {include_usage: true}` into streaming requests |
 
@@ -539,19 +546,19 @@ spec:
 - **Access logs**: written to `<log-dir>/modelpointer.json` in JSON format; each record includes the API key ID, model, and input/output token counts — feed these into your analytics pipeline to track per-key token consumption, perform cost allocation, and chargeback across teams
 - **Prometheus**: `http://localhost:29000` (configurable via `--prometheus-port`); key metrics:
 
-  | Metric                         | Type      | Description                                                                                                  |
-  | ------------------------------ | --------- | ------------------------------------------------------------------------------------------------------------ |
-  | `mg_upstream_ttft_seconds`     | histogram | Time to first token per model and provider — directly reflects backend responsiveness for streaming requests |
-  | `mg_upstream_tpot_ms`          | histogram | Time per output token (ms/token) per model and provider — reflects sustained generation throughput           |
-  | `mg_gateway_duration_seconds`  | histogram | End-to-end request duration including retries                                                                |
-  | `mg_upstream_duration_seconds` | histogram | Single-attempt upstream call duration                                                                        |
-  | `mg_gateway_requests_total`    | counter   | Request volume by model, endpoint, streaming                                                                 |
-  | `mg_gateway_errors_total`      | counter   | Errors by model, endpoint, error type                                                                        |
-  | `mg_upstream_requests_total`   | counter   | Per-attempt upstream calls by model, provider, status code                                                   |
-  | `mg_retry_attempts_total`      | counter   | Retry count by model and trigger status code                                                                 |
-  | `mg_retry_exhausted_total`     | counter   | Requests that exhausted all retries                                                                          |
-  | `mg_worker_cb_state`           | gauge     | Circuit breaker state per backend (0=closed, 1=open, 2=half-open)                                            |
-  | `mg_worker_available_total`    | gauge     | Available (circuit-closed) backends per model                                                                |
+  | Metric                                   | Type      | Description                                                                                                  |
+  | ---------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------ |
+  | `modelpointer_upstream_ttft_seconds`     | histogram | Time to first token per model and provider — directly reflects backend responsiveness for streaming requests |
+  | `modelpointer_upstream_tpot_ms`          | histogram | Time per output token (ms/token) per model and provider — reflects sustained generation throughput           |
+  | `modelpointer_gateway_duration_seconds`  | histogram | End-to-end request duration including retries                                                                |
+  | `modelpointer_upstream_duration_seconds` | histogram | Single-attempt upstream call duration                                                                        |
+  | `modelpointer_gateway_requests_total`    | counter   | Request volume by model, endpoint, streaming                                                                 |
+  | `modelpointer_gateway_errors_total`      | counter   | Errors by model, endpoint, error type                                                                        |
+  | `modelpointer_upstream_requests_total`   | counter   | Per-attempt upstream calls by model, provider, status code                                                   |
+  | `modelpointer_retry_attempts_total`      | counter   | Retry count by model and trigger status code                                                                 |
+  | `modelpointer_retry_exhausted_total`     | counter   | Requests that exhausted all retries                                                                          |
+  | `modelpointer_worker_cb_state`           | gauge     | Circuit breaker state per backend (0=closed, 1=open, 2=half-open)                                            |
+  | `modelpointer_worker_available_total`    | gauge     | Available (circuit-closed) backends per model                                                                |
 
   All metrics are labeled with `model` and `provider`, making it straightforward to compare TTFT and TPOT across different backend deployments and identify performance regressions on a per-model basis.
 - **OpenTelemetry**: pass `--enable-trace --otlp-traces-endpoint http://...` to emit spans
@@ -581,6 +588,22 @@ docker run -d \
   -e DATABASE_URL="postgres://user:pass@db-host/modelpointer" \
   modelpointer:latest serve
 ```
+
+---
+
+## ModelPointer Commercial
+
+ModelPointer follows an **open-core** model. The gateway in this repository is complete and production-ready on its own. For teams that need enterprise-grade LLM governance, [ModelPointer Commercial](https://www.modelpointer.com) builds a full management platform on top of it:
+
+- **Web console** — visually manage routes, upstreams, API keys, and quota overrides, with no hand-editing of YAML
+- **Usage analytics & cost/chargeback dashboards** — track per-key and per-application token consumption
+- **User & access management** — control who is allowed to use models, and hand over or revoke a departing employee's API keys cleanly
+- **Application management** — organize API keys by application, so you always know which app each key belongs to
+
+Links:
+
+- **Website**: https://www.modelpointer.com
+- **Documentation**: https://modelpointer.github.io/modelpointer-docs/index.html
 
 ---
 

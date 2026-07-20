@@ -77,7 +77,10 @@ mod tests {
         .build()
         .unwrap();
 
-        assert_eq!(request.headers().get("authorization").unwrap(), "Bearer test-key");
+        assert_eq!(
+            request.headers().get("authorization").unwrap(),
+            "Bearer test-key"
+        );
         assert!(request.headers().get("x-api-key").is_none());
     }
 }

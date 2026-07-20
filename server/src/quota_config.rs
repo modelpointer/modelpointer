@@ -81,7 +81,10 @@ impl QuotaStore {
             .map(|q| {
                 (
                     (q.api_key_id, q.model_id),
-                    KeyQuota { key_rpm: q.key_rpm, key_tpm: q.key_tpm },
+                    KeyQuota {
+                        key_rpm: q.key_rpm,
+                        key_tpm: q.key_tpm,
+                    },
                 )
             })
             .collect();
@@ -112,10 +115,19 @@ impl QuotaConfigSource {
 
     pub(crate) fn load(&self) -> Result<Vec<RawApiKeyQuota>, String> {
         let content = std::fs::read_to_string(&self.path).map_err(|e| {
-            format!("Failed to read quota config '{}': {}", self.path.display(), e)
+            format!(
+                "Failed to read quota config '{}': {}",
+                self.path.display(),
+                e
+            )
         })?;
-        let raw: RawQuotaConfig = serde_yaml::from_str(&content)
-            .map_err(|e| format!("Quota config parse error in '{}': {}", self.path.display(), e))?;
+        let raw: RawQuotaConfig = serde_yaml::from_str(&content).map_err(|e| {
+            format!(
+                "Quota config parse error in '{}': {}",
+                self.path.display(),
+                e
+            )
+        })?;
         Ok(raw.api_key_quotas)
     }
 }

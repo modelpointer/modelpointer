@@ -13,12 +13,11 @@ pub(crate) async fn load_all_quota_overrides(
     pool: &AnyPool,
     _dialect: DatabaseDialect,
 ) -> Result<Vec<RawApiKeyQuota>, String> {
-    let rows = sqlx::query(
-        "SELECT api_key_id, model_id, rpm, tpm FROM api_key_model_quota_overrides",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("DB error loading quota overrides: {}", e))?;
+    let rows =
+        sqlx::query("SELECT api_key_id, model_id, rpm, tpm FROM api_key_model_quota_overrides")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("DB error loading quota overrides: {e}"))?;
 
     Ok(rows
         .into_iter()

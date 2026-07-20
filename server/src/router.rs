@@ -6,39 +6,36 @@ use std::{
 use async_trait::async_trait;
 use axum::{
     body::Body,
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE},
     response::Response,
 };
 use futures_util::StreamExt;
 use serde_json::to_value;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{info, info_span, Instrument};
 use tracing::field::Empty;
+use tracing::{Instrument, info, info_span};
 
-
+use crate::log_sink::{AccessLogRecord, LogSink};
+use crate::middleware::extract_api_key;
 use modelpointer_core::{
     app_context::AppContext,
     config::RetryConfig,
+    header_utils::apply_provider_headers,
+    observability::metrics::{Metrics, bool_to_static_str, metrics_labels},
+    openai_protocol::{
+        chat::ChatCompletionRequest, embedding::EmbeddingRequest, messages::CreateMessageRequest,
+    },
     rate_limit::RateLimitCtx,
     upstream::{
-        is_retryable_status, RetryExecutor,
-        RuntimeType, Upstream, UpstreamRegistry, ApiCompatibility,
+        ApiCompatibility, RetryExecutor, RuntimeType, Upstream, UpstreamRegistry,
+        is_retryable_status,
     },
-    observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    openai_protocol::{
-        chat::ChatCompletionRequest,
-        messages::CreateMessageRequest,
-        embedding::EmbeddingRequest,
-    },
-    header_utils::apply_provider_headers,
 };
-use crate::middleware::extract_api_key;
-use crate::log_sink::{LogSink, AccessLogRecord};
 
 use metrics_labels::{
     ENDPOINT_CHAT, ENDPOINT_EMBEDDINGS, ENDPOINT_MESSAGES, ENDPOINT_RESPONSES,
-    ENDPOINT_RESPONSES_RETRIEVE, ENDPOINT_RESPONSES_DELETE, ENDPOINT_RESPONSES_INPUT_ITEMS,
+    ENDPOINT_RESPONSES_DELETE, ENDPOINT_RESPONSES_INPUT_ITEMS, ENDPOINT_RESPONSES_RETRIEVE,
 };
 
 /// Maximum number of bytes accumulated into `resp_buf` when `log_request_body`
@@ -78,11 +75,23 @@ struct TokenUsage {
 fn extract_usage_from_json(bytes: &[u8]) -> Option<TokenUsage> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let usage = v.get("usage")?;
-    let prompt = usage.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-    let completion = usage.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-    let total = usage.get("total_tokens").and_then(|t| t.as_u64())
+    let prompt = usage
+        .get("prompt_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+    let completion = usage
+        .get("completion_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+    let total = usage
+        .get("total_tokens")
+        .and_then(|t| t.as_u64())
         .unwrap_or((prompt + completion) as u64) as u32;
-    Some(TokenUsage { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total })
+    Some(TokenUsage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: total,
+    })
 }
 
 /// Parse `usage` block from a buffered Anthropic-format JSON response body.
@@ -90,10 +99,20 @@ fn extract_usage_from_json(bytes: &[u8]) -> Option<TokenUsage> {
 fn extract_anthropic_usage_from_json(bytes: &[u8]) -> Option<TokenUsage> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let usage = v.get("usage")?;
-    let prompt = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-    let completion = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+    let prompt = usage
+        .get("input_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+    let completion = usage
+        .get("output_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
     let total = prompt + completion;
-    Some(TokenUsage { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total })
+    Some(TokenUsage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: total,
+    })
 }
 
 /// Parse `usage` from an OpenAI **Responses API** non-streaming response body.
@@ -101,11 +120,23 @@ fn extract_anthropic_usage_from_json(bytes: &[u8]) -> Option<TokenUsage> {
 fn extract_responses_usage_from_json(bytes: &[u8]) -> Option<TokenUsage> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let usage = v.get("usage")?;
-    let prompt = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-    let completion = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-    let total = usage.get("total_tokens").and_then(|t| t.as_u64())
+    let prompt = usage
+        .get("input_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+    let completion = usage
+        .get("output_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+    let total = usage
+        .get("total_tokens")
+        .and_then(|t| t.as_u64())
         .unwrap_or((prompt + completion) as u64) as u32;
-    Some(TokenUsage { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total })
+    Some(TokenUsage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: total,
+    })
 }
 
 /// Parse SSE events from the **Responses API** streaming format and return
@@ -145,12 +176,24 @@ fn parse_responses_sse_chunk(bytes: &[u8]) -> (Option<TokenUsage>, Option<String
                 // Supports two layouts:
                 //   OpenAI nested : {"type":"response.created","response":{"id":"resp_xxx",...}}
                 //   DashScope flat: {"id":"resp-1","status":"in_progress",...}
-                let is_created = evt == Some("response.created") || type_field == Some("response.created");
+                let is_created =
+                    evt == Some("response.created") || type_field == Some("response.created");
                 if is_created && response_id.is_none() {
-                    let id = v.get("response").and_then(|r| r.get("id")).and_then(|i| i.as_str())
+                    let id = v
+                        .get("response")
+                        .and_then(|r| r.get("id"))
+                        .and_then(|i| i.as_str())
                         .or_else(|| v.get("id").and_then(|i| i.as_str()));
                     if let Some(id) = id {
-                        tracing::debug!(response_id = id, layout = if v.get("response").is_some() { "nested" } else { "flat" }, "responses SSE: extracted response_id");
+                        tracing::debug!(
+                            response_id = id,
+                            layout = if v.get("response").is_some() {
+                                "nested"
+                            } else {
+                                "flat"
+                            },
+                            "responses SSE: extracted response_id"
+                        );
                         response_id = Some(id.to_string());
                     }
                 }
@@ -159,18 +202,30 @@ fn parse_responses_sse_chunk(bytes: &[u8]) -> (Option<TokenUsage>, Option<String
                 // Supports two layouts:
                 //   OpenAI nested : {"type":"response.completed","response":{"usage":{...},"status":"completed"}}
                 //   DashScope flat: {"id":"resp-1","status":"completed","usage":{...}}
-                let is_completed = evt == Some("response.completed") || type_field == Some("response.completed");
+                let is_completed =
+                    evt == Some("response.completed") || type_field == Some("response.completed");
                 if is_completed {
-                    let layout = if v.get("response").is_some() { "nested" } else { "flat" };
+                    let layout = if v.get("response").is_some() {
+                        "nested"
+                    } else {
+                        "flat"
+                    };
 
                     // usage: nested response.usage → flat usage
-                    let usage_node = v.get("response").and_then(|r| r.get("usage"))
+                    let usage_node = v
+                        .get("response")
+                        .and_then(|r| r.get("usage"))
                         .or_else(|| v.get("usage"));
                     if let Some(u) = usage_node {
-                        let prompt = u.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-                        let completion = u.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-                        let total = u.get("total_tokens").and_then(|t| t.as_u64())
-                            .unwrap_or((prompt + completion) as u64) as u32;
+                        let prompt =
+                            u.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+                        let completion =
+                            u.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+                        let total = u
+                            .get("total_tokens")
+                            .and_then(|t| t.as_u64())
+                            .unwrap_or((prompt + completion) as u64)
+                            as u32;
                         tracing::debug!(
                             layout,
                             input_tokens = prompt,
@@ -179,17 +234,32 @@ fn parse_responses_sse_chunk(bytes: &[u8]) -> (Option<TokenUsage>, Option<String
                             "responses SSE: extracted usage from response.completed"
                         );
                         if prompt > 0 || completion > 0 {
-                            usage = Some(TokenUsage { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total });
+                            usage = Some(TokenUsage {
+                                prompt_tokens: prompt,
+                                completion_tokens: completion,
+                                total_tokens: total,
+                            });
                         }
                     } else {
-                        tracing::debug!(layout, raw = json_str, "responses SSE: response.completed — no usage node found");
+                        tracing::debug!(
+                            layout,
+                            raw = json_str,
+                            "responses SSE: response.completed — no usage node found"
+                        );
                     }
 
                     // status: nested response.status → flat status
-                    let status_val = v.get("response").and_then(|r| r.get("status")).and_then(|s| s.as_str())
+                    let status_val = v
+                        .get("response")
+                        .and_then(|r| r.get("status"))
+                        .and_then(|s| s.as_str())
                         .or_else(|| v.get("status").and_then(|s| s.as_str()));
                     if let Some(s) = status_val {
-                        tracing::debug!(layout, status = s, "responses SSE: extracted status from response.completed");
+                        tracing::debug!(
+                            layout,
+                            status = s,
+                            "responses SSE: extracted status from response.completed"
+                        );
                         status = Some(s.to_string());
                     }
                 }
@@ -214,12 +284,25 @@ fn extract_usage_from_sse_chunk(bytes: &[u8]) -> Option<TokenUsage> {
             }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
                 if let Some(usage) = v.get("usage") {
-                    let prompt = usage.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-                    let completion = usage.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-                    let total = usage.get("total_tokens").and_then(|t| t.as_u64())
-                        .unwrap_or((prompt + completion) as u64) as u32;
+                    let prompt = usage
+                        .get("prompt_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0) as u32;
+                    let completion = usage
+                        .get("completion_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0) as u32;
+                    let total = usage
+                        .get("total_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or((prompt + completion) as u64)
+                        as u32;
                     if prompt > 0 || completion > 0 {
-                        found = Some(TokenUsage { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total });
+                        found = Some(TokenUsage {
+                            prompt_tokens: prompt,
+                            completion_tokens: completion,
+                            total_tokens: total,
+                        });
                     }
                 }
             }
@@ -235,14 +318,26 @@ fn extract_anthropic_usage_from_sse_chunk(bytes: &[u8]) -> Option<TokenUsage> {
     let mut found = None;
     for line in text.lines() {
         if let Some(json_str) = line.strip_prefix("data:").map(str::trim_start) {
-            if json_str.trim() == "[DONE]" { continue; }
+            if json_str.trim() == "[DONE]" {
+                continue;
+            }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
                 if let Some(usage) = v.get("usage") {
-                    let prompt = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
-                    let completion = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+                    let prompt = usage
+                        .get("input_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0) as u32;
+                    let completion = usage
+                        .get("output_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0) as u32;
                     let total = prompt + completion;
                     if prompt > 0 || completion > 0 {
-                        found = Some(TokenUsage { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total });
+                        found = Some(TokenUsage {
+                            prompt_tokens: prompt,
+                            completion_tokens: completion,
+                            total_tokens: total,
+                        });
                     }
                 }
             }
@@ -257,7 +352,9 @@ fn extract_anthropic_usage_from_sse_chunk(bytes: &[u8]) -> Option<TokenUsage> {
 
 /// Extract `choices[0].finish_reason` from a buffered OpenAI JSON response.
 fn extract_finish_reason_from_json(bytes: &[u8]) -> String {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else { return String::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return String::new();
+    };
     v.get("choices")
         .and_then(|c| c.get(0))
         .and_then(|c| c.get("finish_reason"))
@@ -268,7 +365,9 @@ fn extract_finish_reason_from_json(bytes: &[u8]) -> String {
 
 /// Extract `stop_reason` from a buffered Anthropic JSON response.
 fn extract_anthropic_finish_reason_from_json(bytes: &[u8]) -> String {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else { return String::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return String::new();
+    };
     v.get("stop_reason")
         .and_then(|r| r.as_str())
         .unwrap_or("")
@@ -277,7 +376,9 @@ fn extract_anthropic_finish_reason_from_json(bytes: &[u8]) -> String {
 
 /// Extract `status` from a buffered Responses API JSON response.
 fn extract_responses_status_from_json(bytes: &[u8]) -> String {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else { return String::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return String::new();
+    };
     v.get("status")
         .and_then(|r| r.as_str())
         .unwrap_or("")
@@ -289,9 +390,12 @@ fn extract_finish_reason_from_sse_chunk(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     for line in text.lines() {
         if let Some(json_str) = line.strip_prefix("data:").map(str::trim_start) {
-            if json_str.trim() == "[DONE]" { continue; }
+            if json_str.trim() == "[DONE]" {
+                continue;
+            }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                if let Some(reason) = v.get("choices")
+                if let Some(reason) = v
+                    .get("choices")
                     .and_then(|c| c.get(0))
                     .and_then(|c| c.get("finish_reason"))
                     .and_then(|r| r.as_str())
@@ -312,7 +416,8 @@ fn extract_anthropic_finish_reason_from_sse_chunk(bytes: &[u8]) -> Option<String
         if let Some(json_str) = line.strip_prefix("data:").map(str::trim_start) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
                 if v.get("type").and_then(|t| t.as_str()) == Some("message_delta") {
-                    if let Some(reason) = v.get("delta")
+                    if let Some(reason) = v
+                        .get("delta")
                         .and_then(|d| d.get("stop_reason"))
                         .and_then(|r| r.as_str())
                         .filter(|s| !s.is_empty())
@@ -424,14 +529,14 @@ fn emit_access_log(
         "access"
     );
     log_sink.try_send(AccessLogRecord {
-        ts:                chrono::Utc::now(),
-        request_id:        request_id.to_owned(),
-        api_key_id:        api_key_id.to_owned(),
-        model:             model.to_owned(),
-        endpoint:          endpoint.to_owned(),
-        provider_url:      provider_url.to_owned(),
-        provider_node_id:  provider_node_id.to_owned(),
-        upstream_model:    upstream_model.to_owned(),
+        ts: chrono::Utc::now(),
+        request_id: request_id.to_owned(),
+        api_key_id: api_key_id.to_owned(),
+        model: model.to_owned(),
+        endpoint: endpoint.to_owned(),
+        provider_url: provider_url.to_owned(),
+        provider_node_id: provider_node_id.to_owned(),
+        upstream_model: upstream_model.to_owned(),
         status_code,
         latency_ms,
         streaming,
@@ -440,7 +545,7 @@ fn emit_access_log(
         prompt_tokens,
         completion_tokens,
         total_tokens,
-        finish_reason:     finish_reason.to_owned(),
+        finish_reason: finish_reason.to_owned(),
     });
 }
 
@@ -476,18 +581,18 @@ pub trait RouterTrait: Send + Sync {
 
     /// Route a /v1/responses request (OpenAI Responses API).
     ///
-    /// Requires the `x-tp-provider` header (e.g. `aliyun.beijing`) to explicitly
+    /// Requires the `x-mp-provider` header (e.g. `aliyun.beijing`) to explicitly
     /// pin the target upstream. This avoids the need for any in-gateway state to
     /// track which upstream created a response.
     async fn route_responses(
         &self,
-        body: serde_json::Value,  // taken by value; impl may mutate internally
+        body: serde_json::Value, // taken by value; impl may mutate internally
         headers: &HeaderMap,
         ctx: &RequestContext,
     ) -> Response;
 
     /// Retrieve a stored response by ID (`GET /v1/responses/{response_id}`).
-    /// Requires `x-tp-provider` header to route to the correct upstream.
+    /// Requires `x-mp-provider` header to route to the correct upstream.
     async fn route_response_retrieve(
         &self,
         response_id: &str,
@@ -496,7 +601,7 @@ pub trait RouterTrait: Send + Sync {
     ) -> Response;
 
     /// Delete a stored response by ID (`DELETE /v1/responses/{response_id}`).
-    /// Requires `x-tp-provider` header to route to the correct upstream.
+    /// Requires `x-mp-provider` header to route to the correct upstream.
     async fn route_response_delete(
         &self,
         response_id: &str,
@@ -506,7 +611,7 @@ pub trait RouterTrait: Send + Sync {
 
     /// List input items for a response (`GET /v1/responses/{response_id}/input_items`).
     /// `query_string` is forwarded verbatim (pagination params, etc.).
-    /// Requires `x-tp-provider` header to route to the correct upstream.
+    /// Requires `x-mp-provider` header to route to the correct upstream.
     async fn route_response_input_items(
         &self,
         response_id: &str,
@@ -528,9 +633,9 @@ pub struct GatewayRouter {
 /// Error response helpers for consistent API error formatting
 mod error_responses {
     use axum::{
+        Json,
         http::StatusCode,
         response::{IntoResponse, Response},
-        Json,
     };
     use serde_json::json;
 
@@ -575,9 +680,9 @@ mod error_responses {
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": {
-                    "message": "Missing required header 'x-tp-provider'. \
+                    "message": "Missing required header 'x-mp-provider'. \
                                 All /v1/responses requests must specify a provider, \
-                                e.g. 'x-tp-provider: aliyun.beijing'.",
+                                e.g. 'x-mp-provider: aliyun.beijing'.",
                     "type": "missing_header",
                     "code": "missing_x_tp_provider"
                 }
@@ -605,21 +710,21 @@ mod error_responses {
     }
 }
 
-/// Extract the `x-tp-provider` header value (e.g. "aliyun.beijing").
+/// Extract the `x-mp-provider` header value (e.g. "aliyun.beijing").
 /// Returns `None` if the header is absent or empty.
 fn extract_provider_id(headers: &HeaderMap) -> Option<String> {
     headers
-        .get("x-tp-provider")
+        .get("x-mp-provider")
         .and_then(|h| h.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
 }
 
 /// Extract routing key from request headers.
-/// Priority: `x-tp-routing-key` header → API key (`Authorization: Bearer` / `x-api-key`).
+/// Priority: `x-mp-routing-key` header → API key (`Authorization: Bearer` / `x-api-key`).
 fn extract_routing_key(headers: &HeaderMap) -> Option<String> {
     if let Some(key) = headers
-        .get("x-tp-routing-key")
+        .get("x-mp-routing-key")
         .and_then(|h| h.to_str().ok())
         .filter(|s| !s.is_empty())
     {
@@ -635,6 +740,7 @@ impl GatewayRouter {
     /// `upstream_path` is the path portion appended to `upstream.base_url()`,
     /// e.g. `"/responses/resp_xxx"`.  `query_string` is forwarded verbatim
     /// (may be empty).
+    #[allow(clippy::too_many_arguments)]
     async fn proxy_request(
         &self,
         method: reqwest::Method,
@@ -664,7 +770,7 @@ impl GatewayRouter {
         let upstream_api_key = upstream.api_key().clone();
         let auth_header = upstream_api_key
             .as_deref()
-            .and_then(|k| HeaderValue::from_str(&format!("Bearer {}", k)).ok());
+            .and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok());
         req = apply_provider_headers(req, upstream.api_compatibility(), auth_header.as_ref());
 
         let send_start = Instant::now();
@@ -673,16 +779,29 @@ impl GatewayRouter {
             Err(e) => {
                 emit_access_log(
                     &log_sink,
-                    &req_id, &api_key_id, model, endpoint,
-                    upstream.base_url(), upstream.provider_node_id(),
-                    upstream.upstream_model_name().unwrap_or(model), 0,
+                    &req_id,
+                    &api_key_id,
+                    model,
+                    endpoint,
+                    upstream.base_url(),
+                    upstream.provider_node_id(),
+                    upstream.upstream_model_name().unwrap_or(model),
+                    0,
                     send_start.elapsed().as_millis() as u64,
-                    false, 0, 0.0, 0, 0, 0, "", "", "",
+                    false,
+                    0,
+                    0.0,
+                    0,
+                    0,
+                    0,
+                    "",
+                    "",
+                    "",
                 );
                 upstream.circuit_breaker().record_failure();
                 Metrics::record_gateway_error(model, endpoint, metrics_labels::ERROR_BACKEND);
                 return error_responses::service_unavailable(format!(
-                    "Failed to contact upstream: {}", e
+                    "Failed to contact upstream: {e}"
                 ));
             }
         };
@@ -706,23 +825,47 @@ impl GatewayRouter {
                     };
                     emit_access_log(
                         &log_sink,
-                        &req_id, &api_key_id, model, endpoint,
-                        upstream.base_url(), upstream.provider_node_id(),
-                        upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
+                        &req_id,
+                        &api_key_id,
+                        model,
+                        endpoint,
+                        upstream.base_url(),
+                        upstream.provider_node_id(),
+                        upstream.upstream_model_name().unwrap_or(model),
+                        status.as_u16(),
                         elapsed.as_millis() as u64,
-                        false, 0, 0.0,
-                        usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
-                        "", "", &resp_body_str,
+                        false,
+                        0,
+                        0.0,
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        usage.total_tokens,
+                        "",
+                        "",
+                        &resp_body_str,
                     );
                     Metrics::record_gateway_duration(model, endpoint, start.elapsed());
                 } else {
                     emit_access_log(
                         &log_sink,
-                        &req_id, &api_key_id, model, endpoint,
-                        upstream.base_url(), upstream.provider_node_id(),
-                        upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
+                        &req_id,
+                        &api_key_id,
+                        model,
+                        endpoint,
+                        upstream.base_url(),
+                        upstream.provider_node_id(),
+                        upstream.upstream_model_name().unwrap_or(model),
+                        status.as_u16(),
                         elapsed.as_millis() as u64,
-                        false, 0, 0.0, 0, 0, 0, "", "", "",
+                        false,
+                        0,
+                        0.0,
+                        0,
+                        0,
+                        0,
+                        "",
+                        "",
+                        "",
                     );
                     upstream.circuit_breaker().record_failure();
                     Metrics::record_gateway_error(model, endpoint, metrics_labels::ERROR_BACKEND);
@@ -737,15 +880,28 @@ impl GatewayRouter {
             Err(e) => {
                 emit_access_log(
                     &log_sink,
-                    &req_id, &api_key_id, model, endpoint,
-                    upstream.base_url(), upstream.provider_node_id(),
-                    upstream.upstream_model_name().unwrap_or(model), 0,
+                    &req_id,
+                    &api_key_id,
+                    model,
+                    endpoint,
+                    upstream.base_url(),
+                    upstream.provider_node_id(),
+                    upstream.upstream_model_name().unwrap_or(model),
+                    0,
                     send_start.elapsed().as_millis() as u64,
-                    false, 0, 0.0, 0, 0, 0, "", "", "",
+                    false,
+                    0,
+                    0.0,
+                    0,
+                    0,
+                    0,
+                    "",
+                    "",
+                    "",
                 );
                 upstream.circuit_breaker().record_failure();
                 Metrics::record_gateway_error(model, endpoint, metrics_labels::ERROR_BACKEND);
-                error_responses::internal_error(format!("Failed to read response: {}", e))
+                error_responses::internal_error(format!("Failed to read response: {e}"))
             }
         }
     }
@@ -762,7 +918,6 @@ impl GatewayRouter {
             log_sink,
         })
     }
-
 }
 
 #[async_trait::async_trait]
@@ -782,8 +937,12 @@ impl RouterTrait for GatewayRouter {
         let payload = match to_value(body) {
             Ok(v) => v,
             Err(e) => {
-                Metrics::record_gateway_error(model, ENDPOINT_CHAT, metrics_labels::ERROR_VALIDATION);
-                return error_responses::bad_request(format!("Failed to serialize request: {}", e));
+                Metrics::record_gateway_error(
+                    model,
+                    ENDPOINT_CHAT,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return error_responses::bad_request(format!("Failed to serialize request: {e}"));
             }
         };
 
@@ -820,8 +979,11 @@ impl RouterTrait for GatewayRouter {
                 // Re-select on every attempt: respects updated circuit-breaker state
                 // and SWRR weights, enabling fallback-tier switch if primary is unhealthy.
                 let upstream_result = registry.select_with_min_priority(
-                    model, routing_key, Some(&RuntimeType::External),
-                    Some(&ApiCompatibility::OpenAi), min_priority,
+                    model,
+                    routing_key,
+                    Some(&RuntimeType::External),
+                    Some(&ApiCompatibility::OpenAi),
+                    min_priority,
                 );
 
                 let (attempt_url, attempt_payload, attempt_api_key, attempt_rate_limit) =
@@ -832,7 +994,10 @@ impl RouterTrait for GatewayRouter {
                             if let Some(name) = u.upstream_model_name() {
                                 p["model"] = serde_json::Value::String(name.to_string());
                             }
-                            if is_streaming && inject_stream_usage && p.get("stream_options").is_none() {
+                            if is_streaming
+                                && inject_stream_usage
+                                && p.get("stream_options").is_none()
+                            {
                                 p["stream_options"] = serde_json::json!({"include_usage": true});
                             }
                             let key = u.api_key().clone();
@@ -868,22 +1033,32 @@ impl RouterTrait for GatewayRouter {
                     let upstream = match upstream_result {
                         Some(u) => u,
                         None => {
-                            Metrics::record_gateway_error(model, ENDPOINT_CHAT, metrics_labels::ERROR_NO_UPSTREAM);
+                            Metrics::record_gateway_error(
+                                model,
+                                ENDPOINT_CHAT,
+                                metrics_labels::ERROR_NO_UPSTREAM,
+                            );
                             return error_responses::model_not_found(model);
                         }
                     };
                     *lp.lock().unwrap() = upstream.base_url().to_string();
                     *lpni.lock().unwrap() = upstream.provider_node_id().to_string();
-                    *lum.lock().unwrap() = upstream.upstream_model_name().unwrap_or(model).to_string();
+                    *lum.lock().unwrap() =
+                        upstream.upstream_model_name().unwrap_or(model).to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
                     } else {
                         String::new()
                     };
                     let mut req = client.post(&attempt_url).json(&attempt_payload);
-                    let auth_header = attempt_api_key.as_deref()
-                        .and_then(|k| HeaderValue::from_str(&format!("Bearer {}", k)).ok());
-                    req = apply_provider_headers(req, upstream.api_compatibility(), auth_header.as_ref());
+                    let auth_header = attempt_api_key
+                        .as_deref()
+                        .and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok());
+                    req = apply_provider_headers(
+                        req,
+                        upstream.api_compatibility(),
+                        auth_header.as_ref(),
+                    );
 
                     if is_streaming {
                         req = req.header("Accept", "text/event-stream");
@@ -896,7 +1071,9 @@ impl RouterTrait for GatewayRouter {
                             tracing::Span::current().record("error", e.to_string().as_str());
                             Metrics::record_upstream_request(model, upstream.base_url(), 0);
                             upstream.circuit_breaker().record_failure();
-                            return error_responses::service_unavailable(format!("Failed to contact upstream: {}", e));
+                            return error_responses::service_unavailable(format!(
+                                "Failed to contact upstream: {e}"
+                            ));
                         }
                     };
 
@@ -916,17 +1093,24 @@ impl RouterTrait for GatewayRouter {
                         match resp.bytes().await {
                             Ok(body_bytes) => {
                                 let elapsed = send_start.elapsed();
-                                tracing::Span::current().record("latency_ms", elapsed.as_millis() as u64);
-                                Metrics::record_upstream_duration(model, upstream.base_url(), elapsed);
+                                tracing::Span::current()
+                                    .record("latency_ms", elapsed.as_millis() as u64);
+                                Metrics::record_upstream_duration(
+                                    model,
+                                    upstream.base_url(),
+                                    elapsed,
+                                );
                                 if status.is_success() {
                                     upstream.circuit_breaker().record_success();
-                                    let usage = extract_usage_from_json(&body_bytes).unwrap_or_default();
+                                    let usage =
+                                        extract_usage_from_json(&body_bytes).unwrap_or_default();
                                     if usage.total_tokens > 0 {
                                         if let Some(ref rl) = attempt_rate_limit {
                                             rl.record_tokens(&api_key_id, usage.total_tokens).await;
                                         }
                                     }
-                                    let finish_reason = extract_finish_reason_from_json(&body_bytes);
+                                    let finish_reason =
+                                        extract_finish_reason_from_json(&body_bytes);
                                     let resp_body_str = if log_request_body {
                                         String::from_utf8_lossy(&body_bytes).into_owned()
                                     } else {
@@ -934,13 +1118,24 @@ impl RouterTrait for GatewayRouter {
                                     };
                                     emit_access_log(
                                         &log_sink,
-                                        &req_id, &api_key_id, model, ENDPOINT_CHAT,
-                                        upstream.base_url(), upstream.provider_node_id(),
-                                        upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
+                                        &req_id,
+                                        &api_key_id,
+                                        model,
+                                        ENDPOINT_CHAT,
+                                        upstream.base_url(),
+                                        upstream.provider_node_id(),
+                                        upstream.upstream_model_name().unwrap_or(model),
+                                        status.as_u16(),
                                         elapsed.as_millis() as u64,
-                                        false, 0, 0.0,
-                                        usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
-                                        &finish_reason, &req_body_str, &resp_body_str,
+                                        false,
+                                        0,
+                                        0.0,
+                                        usage.prompt_tokens,
+                                        usage.completion_tokens,
+                                        usage.total_tokens,
+                                        &finish_reason,
+                                        &req_body_str,
+                                        &resp_body_str,
                                     );
                                 } else {
                                     upstream.circuit_breaker().record_failure();
@@ -955,7 +1150,9 @@ impl RouterTrait for GatewayRouter {
                             Err(e) => {
                                 tracing::Span::current().record("error", e.to_string().as_str());
                                 upstream.circuit_breaker().record_failure();
-                                error_responses::internal_error(format!("Failed to read response: {}", e))
+                                error_responses::internal_error(format!(
+                                    "Failed to read response: {e}"
+                                ))
                             }
                         }
                     } else {
@@ -972,14 +1169,19 @@ impl RouterTrait for GatewayRouter {
                         let model_id = model.to_string();
                         let provider = upstream.base_url().to_string();
                         let provider_node_id_str = upstream.provider_node_id().to_string();
-                        let upstream_model_str = upstream.upstream_model_name().unwrap_or(model).to_string();
+                        let upstream_model_str =
+                            upstream.upstream_model_name().unwrap_or(model).to_string();
                         let rate_limit_spawn = attempt_rate_limit.clone();
                         let cb_upstream = Arc::clone(&upstream);
                         tokio::spawn(async move {
                             let mut ttft_ms = 0u64;
                             let mut last_usage = TokenUsage::default();
                             let mut last_finish_reason = String::new();
-                            let mut resp_buf = if log_request_body { Some(Vec::new()) } else { None };
+                            let mut resp_buf = if log_request_body {
+                                Some(Vec::new())
+                            } else {
+                                None
+                            };
                             let mut upstream_error = false;
                             let mut first = true;
                             let mut s = stream;
@@ -1000,7 +1202,9 @@ impl RouterTrait for GatewayRouter {
                                             if let Some(u) = extract_usage_from_sse_chunk(line) {
                                                 last_usage = u;
                                             }
-                                            if let Some(r) = extract_finish_reason_from_sse_chunk(line) {
+                                            if let Some(r) =
+                                                extract_finish_reason_from_sse_chunk(line)
+                                            {
                                                 last_finish_reason = r;
                                             }
                                         });
@@ -1015,7 +1219,7 @@ impl RouterTrait for GatewayRouter {
                                     }
                                     Err(e) => {
                                         upstream_error = true;
-                                        let _ = tx.send(Err(format!("Stream error: {}", e))).await;
+                                        let _ = tx.send(Err(format!("Stream error: {e}"))).await;
                                         break;
                                     }
                                 }
@@ -1046,7 +1250,8 @@ impl RouterTrait for GatewayRouter {
                                 }
                             }
                             let total_ms = send_start.elapsed().as_millis() as u64;
-                            let tpot_ms = if last_usage.completion_tokens > 0 && total_ms > ttft_ms {
+                            let tpot_ms = if last_usage.completion_tokens > 0 && total_ms > ttft_ms
+                            {
                                 (total_ms - ttft_ms) as f64 / last_usage.completion_tokens as f64
                             } else {
                                 0.0
@@ -1059,12 +1264,24 @@ impl RouterTrait for GatewayRouter {
                                 .unwrap_or_default();
                             emit_access_log(
                                 &log_sink,
-                                &req_id, &api_key_id, &model_id, ENDPOINT_CHAT,
-                                &provider, &provider_node_id_str, &upstream_model_str, status_code_u16,
+                                &req_id,
+                                &api_key_id,
+                                &model_id,
+                                ENDPOINT_CHAT,
+                                &provider,
+                                &provider_node_id_str,
+                                &upstream_model_str,
+                                status_code_u16,
                                 total_ms,
-                                true, ttft_ms, tpot_ms,
-                                last_usage.prompt_tokens, last_usage.completion_tokens, last_usage.total_tokens,
-                                &last_finish_reason, &req_body_str, &resp_body_str,
+                                true,
+                                ttft_ms,
+                                tpot_ms,
+                                last_usage.prompt_tokens,
+                                last_usage.completion_tokens,
+                                last_usage.total_tokens,
+                                &last_finish_reason,
+                                &req_body_str,
+                                &resp_body_str,
                             );
                         });
                         let mut response =
@@ -1075,7 +1292,8 @@ impl RouterTrait for GatewayRouter {
                             .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
                         response
                     }
-                }.instrument(upstream_span)
+                }
+                .instrument(upstream_span)
             },
             |res, _attempt| is_retryable_status(res.status()),
             |_delay, _next_attempt, status_code| {
@@ -1095,10 +1313,24 @@ impl RouterTrait for GatewayRouter {
             let upstream_model = last_upstream_model.lock().unwrap().clone();
             emit_access_log(
                 &log_sink,
-                &req_id, &api_key_id, model, ENDPOINT_CHAT,
-                &provider, &pnode_id, &upstream_model, response.status().as_u16(),
+                &req_id,
+                &api_key_id,
+                model,
+                ENDPOINT_CHAT,
+                &provider,
+                &pnode_id,
+                &upstream_model,
+                response.status().as_u16(),
                 start.elapsed().as_millis() as u64,
-                is_streaming, 0, 0.0, 0, 0, 0, "", "", "",
+                is_streaming,
+                0,
+                0.0,
+                0,
+                0,
+                0,
+                "",
+                "",
+                "",
             );
             Metrics::record_gateway_error(model, ENDPOINT_CHAT, metrics_labels::ERROR_BACKEND);
         }
@@ -1121,8 +1353,12 @@ impl RouterTrait for GatewayRouter {
         let payload = match to_value(body) {
             Ok(v) => v,
             Err(e) => {
-                Metrics::record_gateway_error(model, ENDPOINT_MESSAGES, metrics_labels::ERROR_VALIDATION);
-                return error_responses::bad_request(format!("Failed to serialize request: {}", e));
+                Metrics::record_gateway_error(
+                    model,
+                    ENDPOINT_MESSAGES,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return error_responses::bad_request(format!("Failed to serialize request: {e}"));
             }
         };
 
@@ -1149,8 +1385,11 @@ impl RouterTrait for GatewayRouter {
             &self.retry_config,
             |attempt| {
                 let upstream_result = registry.select_with_min_priority(
-                    model, routing_key, Some(&RuntimeType::External),
-                    Some(&ApiCompatibility::Anthropic), min_priority,
+                    model,
+                    routing_key,
+                    Some(&RuntimeType::External),
+                    Some(&ApiCompatibility::Anthropic),
+                    min_priority,
                 );
 
                 let (attempt_url, attempt_payload, attempt_api_key, attempt_rate_limit) =
@@ -1194,22 +1433,32 @@ impl RouterTrait for GatewayRouter {
                     let upstream = match upstream_result {
                         Some(u) => u,
                         None => {
-                            Metrics::record_gateway_error(model, ENDPOINT_MESSAGES, metrics_labels::ERROR_NO_UPSTREAM);
+                            Metrics::record_gateway_error(
+                                model,
+                                ENDPOINT_MESSAGES,
+                                metrics_labels::ERROR_NO_UPSTREAM,
+                            );
                             return error_responses::model_not_found(model);
                         }
                     };
                     *lp.lock().unwrap() = upstream.base_url().to_string();
                     *lpni.lock().unwrap() = upstream.provider_node_id().to_string();
-                    *lum.lock().unwrap() = upstream.upstream_model_name().unwrap_or(model).to_string();
+                    *lum.lock().unwrap() =
+                        upstream.upstream_model_name().unwrap_or(model).to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
                     } else {
                         String::new()
                     };
                     let mut req = client.post(&attempt_url).json(&attempt_payload);
-                    let auth_header = attempt_api_key.as_deref()
-                        .and_then(|k| HeaderValue::from_str(&format!("Bearer {}", k)).ok());
-                    req = apply_provider_headers(req, upstream.api_compatibility(), auth_header.as_ref());
+                    let auth_header = attempt_api_key
+                        .as_deref()
+                        .and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok());
+                    req = apply_provider_headers(
+                        req,
+                        upstream.api_compatibility(),
+                        auth_header.as_ref(),
+                    );
 
                     if is_streaming {
                         req = req.header("Accept", "text/event-stream");
@@ -1222,7 +1471,9 @@ impl RouterTrait for GatewayRouter {
                             tracing::Span::current().record("error", e.to_string().as_str());
                             Metrics::record_upstream_request(model, upstream.base_url(), 0);
                             upstream.circuit_breaker().record_failure();
-                            return error_responses::service_unavailable(format!("Failed to contact upstream: {}", e));
+                            return error_responses::service_unavailable(format!(
+                                "Failed to contact upstream: {e}"
+                            ));
                         }
                     };
 
@@ -1236,18 +1487,25 @@ impl RouterTrait for GatewayRouter {
                         match resp.bytes().await {
                             Ok(body_bytes) => {
                                 let elapsed = send_start.elapsed();
-                                tracing::Span::current().record("latency_ms", elapsed.as_millis() as u64);
-                                Metrics::record_upstream_duration(model, upstream.base_url(), elapsed);
+                                tracing::Span::current()
+                                    .record("latency_ms", elapsed.as_millis() as u64);
+                                Metrics::record_upstream_duration(
+                                    model,
+                                    upstream.base_url(),
+                                    elapsed,
+                                );
                                 if status.is_success() {
                                     upstream.circuit_breaker().record_success();
                                     // Anthropic usage fields differ: input_tokens / output_tokens
-                                    let usage = extract_anthropic_usage_from_json(&body_bytes).unwrap_or_default();
+                                    let usage = extract_anthropic_usage_from_json(&body_bytes)
+                                        .unwrap_or_default();
                                     if usage.total_tokens > 0 {
                                         if let Some(ref rl) = attempt_rate_limit {
                                             rl.record_tokens(&api_key_id, usage.total_tokens).await;
                                         }
                                     }
-                                    let finish_reason = extract_anthropic_finish_reason_from_json(&body_bytes);
+                                    let finish_reason =
+                                        extract_anthropic_finish_reason_from_json(&body_bytes);
                                     let resp_body_str = if log_request_body {
                                         String::from_utf8_lossy(&body_bytes).into_owned()
                                     } else {
@@ -1255,13 +1513,24 @@ impl RouterTrait for GatewayRouter {
                                     };
                                     emit_access_log(
                                         &log_sink,
-                                        &req_id, &api_key_id, model, ENDPOINT_MESSAGES,
-                                        upstream.base_url(), upstream.provider_node_id(),
-                                        upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
+                                        &req_id,
+                                        &api_key_id,
+                                        model,
+                                        ENDPOINT_MESSAGES,
+                                        upstream.base_url(),
+                                        upstream.provider_node_id(),
+                                        upstream.upstream_model_name().unwrap_or(model),
+                                        status.as_u16(),
                                         elapsed.as_millis() as u64,
-                                        false, 0, 0.0,
-                                        usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
-                                        &finish_reason, &req_body_str, &resp_body_str,
+                                        false,
+                                        0,
+                                        0.0,
+                                        usage.prompt_tokens,
+                                        usage.completion_tokens,
+                                        usage.total_tokens,
+                                        &finish_reason,
+                                        &req_body_str,
+                                        &resp_body_str,
                                     );
                                 } else {
                                     upstream.circuit_breaker().record_failure();
@@ -1276,7 +1545,9 @@ impl RouterTrait for GatewayRouter {
                             Err(e) => {
                                 tracing::Span::current().record("error", e.to_string().as_str());
                                 upstream.circuit_breaker().record_failure();
-                                error_responses::internal_error(format!("Failed to read response: {}", e))
+                                error_responses::internal_error(format!(
+                                    "Failed to read response: {e}"
+                                ))
                             }
                         }
                     } else {
@@ -1291,14 +1562,19 @@ impl RouterTrait for GatewayRouter {
                         let model_id = model.to_string();
                         let provider = upstream.base_url().to_string();
                         let provider_node_id_str = upstream.provider_node_id().to_string();
-                        let upstream_model_str = upstream.upstream_model_name().unwrap_or(model).to_string();
+                        let upstream_model_str =
+                            upstream.upstream_model_name().unwrap_or(model).to_string();
                         let rate_limit_spawn = attempt_rate_limit.clone();
                         let cb_upstream = Arc::clone(&upstream);
                         tokio::spawn(async move {
                             let mut ttft_ms = 0u64;
                             let mut last_usage = TokenUsage::default();
                             let mut last_finish_reason = String::new();
-                            let mut resp_buf = if log_request_body { Some(Vec::new()) } else { None };
+                            let mut resp_buf = if log_request_body {
+                                Some(Vec::new())
+                            } else {
+                                None
+                            };
                             let mut upstream_error = false;
                             let mut first = true;
                             let mut s = stream;
@@ -1316,10 +1592,14 @@ impl RouterTrait for GatewayRouter {
                                         // Parse only complete lines; partial lines split across
                                         // chunks are buffered until their newline arrives.
                                         line_buf.push(&bytes, |line| {
-                                            if let Some(u) = extract_anthropic_usage_from_sse_chunk(line) {
+                                            if let Some(u) =
+                                                extract_anthropic_usage_from_sse_chunk(line)
+                                            {
                                                 last_usage = u;
                                             }
-                                            if let Some(r) = extract_anthropic_finish_reason_from_sse_chunk(line) {
+                                            if let Some(r) =
+                                                extract_anthropic_finish_reason_from_sse_chunk(line)
+                                            {
                                                 last_finish_reason = r;
                                             }
                                         });
@@ -1334,7 +1614,7 @@ impl RouterTrait for GatewayRouter {
                                     }
                                     Err(e) => {
                                         upstream_error = true;
-                                        let _ = tx.send(Err(format!("Stream error: {}", e))).await;
+                                        let _ = tx.send(Err(format!("Stream error: {e}"))).await;
                                         break;
                                     }
                                 }
@@ -1344,7 +1624,9 @@ impl RouterTrait for GatewayRouter {
                                 if let Some(u) = extract_anthropic_usage_from_sse_chunk(line) {
                                     last_usage = u;
                                 }
-                                if let Some(r) = extract_anthropic_finish_reason_from_sse_chunk(line) {
+                                if let Some(r) =
+                                    extract_anthropic_finish_reason_from_sse_chunk(line)
+                                {
                                     last_finish_reason = r;
                                 }
                             });
@@ -1361,7 +1643,8 @@ impl RouterTrait for GatewayRouter {
                                 }
                             }
                             let total_ms = send_start.elapsed().as_millis() as u64;
-                            let tpot_ms = if last_usage.completion_tokens > 0 && total_ms > ttft_ms {
+                            let tpot_ms = if last_usage.completion_tokens > 0 && total_ms > ttft_ms
+                            {
                                 (total_ms - ttft_ms) as f64 / last_usage.completion_tokens as f64
                             } else {
                                 0.0
@@ -1374,12 +1657,24 @@ impl RouterTrait for GatewayRouter {
                                 .unwrap_or_default();
                             emit_access_log(
                                 &log_sink,
-                                &req_id, &api_key_id, &model_id, ENDPOINT_MESSAGES,
-                                &provider, &provider_node_id_str, &upstream_model_str, status_code_u16,
+                                &req_id,
+                                &api_key_id,
+                                &model_id,
+                                ENDPOINT_MESSAGES,
+                                &provider,
+                                &provider_node_id_str,
+                                &upstream_model_str,
+                                status_code_u16,
                                 total_ms,
-                                true, ttft_ms, tpot_ms,
-                                last_usage.prompt_tokens, last_usage.completion_tokens, last_usage.total_tokens,
-                                &last_finish_reason, &req_body_str, &resp_body_str,
+                                true,
+                                ttft_ms,
+                                tpot_ms,
+                                last_usage.prompt_tokens,
+                                last_usage.completion_tokens,
+                                last_usage.total_tokens,
+                                &last_finish_reason,
+                                &req_body_str,
+                                &resp_body_str,
                             );
                         });
                         let mut response =
@@ -1390,7 +1685,8 @@ impl RouterTrait for GatewayRouter {
                             .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
                         response
                     }
-                }.instrument(upstream_span)
+                }
+                .instrument(upstream_span)
             },
             |res, _attempt| is_retryable_status(res.status()),
             |_delay, _next_attempt, status_code| {
@@ -1410,10 +1706,24 @@ impl RouterTrait for GatewayRouter {
             let upstream_model = last_upstream_model.lock().unwrap().clone();
             emit_access_log(
                 &log_sink,
-                &req_id, &api_key_id, model, ENDPOINT_MESSAGES,
-                &provider, &pnode_id, &upstream_model, response.status().as_u16(),
+                &req_id,
+                &api_key_id,
+                model,
+                ENDPOINT_MESSAGES,
+                &provider,
+                &pnode_id,
+                &upstream_model,
+                response.status().as_u16(),
                 start.elapsed().as_millis() as u64,
-                is_streaming, 0, 0.0, 0, 0, 0, "", "", "",
+                is_streaming,
+                0,
+                0.0,
+                0,
+                0,
+                0,
+                "",
+                "",
+                "",
             );
             Metrics::record_gateway_error(model, ENDPOINT_MESSAGES, metrics_labels::ERROR_BACKEND);
         }
@@ -1435,8 +1745,12 @@ impl RouterTrait for GatewayRouter {
         let payload = match to_value(body) {
             Ok(v) => v,
             Err(e) => {
-                Metrics::record_gateway_error(model, ENDPOINT_EMBEDDINGS, metrics_labels::ERROR_VALIDATION);
-                return error_responses::bad_request(format!("Failed to serialize request: {}", e));
+                Metrics::record_gateway_error(
+                    model,
+                    ENDPOINT_EMBEDDINGS,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return error_responses::bad_request(format!("Failed to serialize request: {e}"));
             }
         };
 
@@ -1462,8 +1776,11 @@ impl RouterTrait for GatewayRouter {
             &self.retry_config,
             |attempt| {
                 let upstream_result = registry.select_with_min_priority(
-                    model, routing_key, Some(&RuntimeType::External),
-                    Some(&ApiCompatibility::OpenAi), min_priority,
+                    model,
+                    routing_key,
+                    Some(&RuntimeType::External),
+                    Some(&ApiCompatibility::OpenAi),
+                    min_priority,
                 );
 
                 let (attempt_url, attempt_payload, attempt_api_key, attempt_rate_limit) =
@@ -1506,22 +1823,32 @@ impl RouterTrait for GatewayRouter {
                     let upstream = match upstream_result {
                         Some(u) => u,
                         None => {
-                            Metrics::record_gateway_error(model, ENDPOINT_EMBEDDINGS, metrics_labels::ERROR_NO_UPSTREAM);
+                            Metrics::record_gateway_error(
+                                model,
+                                ENDPOINT_EMBEDDINGS,
+                                metrics_labels::ERROR_NO_UPSTREAM,
+                            );
                             return error_responses::model_not_found(model);
                         }
                     };
                     *lp.lock().unwrap() = upstream.base_url().to_string();
                     *lpni.lock().unwrap() = upstream.provider_node_id().to_string();
-                    *lum.lock().unwrap() = upstream.upstream_model_name().unwrap_or(model).to_string();
+                    *lum.lock().unwrap() =
+                        upstream.upstream_model_name().unwrap_or(model).to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
                     } else {
                         String::new()
                     };
                     let mut req = client.post(&attempt_url).json(&attempt_payload);
-                    let auth_header = attempt_api_key.as_deref()
-                        .and_then(|k| HeaderValue::from_str(&format!("Bearer {}", k)).ok());
-                    req = apply_provider_headers(req, upstream.api_compatibility(), auth_header.as_ref());
+                    let auth_header = attempt_api_key
+                        .as_deref()
+                        .and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok());
+                    req = apply_provider_headers(
+                        req,
+                        upstream.api_compatibility(),
+                        auth_header.as_ref(),
+                    );
 
                     let send_start = Instant::now();
                     let resp = match req.send().await {
@@ -1530,7 +1857,9 @@ impl RouterTrait for GatewayRouter {
                             tracing::Span::current().record("error", e.to_string().as_str());
                             Metrics::record_upstream_request(model, upstream.base_url(), 0);
                             upstream.circuit_breaker().record_failure();
-                            return error_responses::service_unavailable(format!("Failed to contact upstream: {}", e));
+                            return error_responses::service_unavailable(format!(
+                                "Failed to contact upstream: {e}"
+                            ));
                         }
                     };
 
@@ -1543,12 +1872,14 @@ impl RouterTrait for GatewayRouter {
                     match resp.bytes().await {
                         Ok(body_bytes) => {
                             let elapsed = send_start.elapsed();
-                            tracing::Span::current().record("latency_ms", elapsed.as_millis() as u64);
+                            tracing::Span::current()
+                                .record("latency_ms", elapsed.as_millis() as u64);
                             Metrics::record_upstream_duration(model, upstream.base_url(), elapsed);
                             if status.is_success() {
                                 upstream.circuit_breaker().record_success();
                                 // Embedding responses carry token usage in the same structure
-                                let usage = extract_usage_from_json(&body_bytes).unwrap_or_default();
+                                let usage =
+                                    extract_usage_from_json(&body_bytes).unwrap_or_default();
                                 if usage.total_tokens > 0 {
                                     if let Some(ref rl) = attempt_rate_limit {
                                         rl.record_tokens(&api_key_id, usage.total_tokens).await;
@@ -1561,13 +1892,24 @@ impl RouterTrait for GatewayRouter {
                                 };
                                 emit_access_log(
                                     &log_sink,
-                                    &req_id, &api_key_id, model, ENDPOINT_EMBEDDINGS,
-                                    upstream.base_url(), upstream.provider_node_id(),
-                                    upstream.upstream_model_name().unwrap_or(model), status.as_u16(),
+                                    &req_id,
+                                    &api_key_id,
+                                    model,
+                                    ENDPOINT_EMBEDDINGS,
+                                    upstream.base_url(),
+                                    upstream.provider_node_id(),
+                                    upstream.upstream_model_name().unwrap_or(model),
+                                    status.as_u16(),
                                     elapsed.as_millis() as u64,
-                                    false, 0, 0.0,
-                                    usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
-                                    "", &req_body_str, &resp_body_str,
+                                    false,
+                                    0,
+                                    0.0,
+                                    usage.prompt_tokens,
+                                    usage.completion_tokens,
+                                    usage.total_tokens,
+                                    "",
+                                    &req_body_str,
+                                    &resp_body_str,
                                 );
                             } else {
                                 upstream.circuit_breaker().record_failure();
@@ -1582,10 +1924,11 @@ impl RouterTrait for GatewayRouter {
                         Err(e) => {
                             tracing::Span::current().record("error", e.to_string().as_str());
                             upstream.circuit_breaker().record_failure();
-                            error_responses::internal_error(format!("Failed to read response: {}", e))
+                            error_responses::internal_error(format!("Failed to read response: {e}"))
                         }
                     }
-                }.instrument(upstream_span)
+                }
+                .instrument(upstream_span)
             },
             |res, _attempt| is_retryable_status(res.status()),
             |_delay, _next_attempt, status_code| {
@@ -1605,12 +1948,30 @@ impl RouterTrait for GatewayRouter {
             let upstream_model = last_upstream_model.lock().unwrap().clone();
             emit_access_log(
                 &log_sink,
-                &req_id, &api_key_id, model, ENDPOINT_EMBEDDINGS,
-                &provider, &pnode_id, &upstream_model, response.status().as_u16(),
+                &req_id,
+                &api_key_id,
+                model,
+                ENDPOINT_EMBEDDINGS,
+                &provider,
+                &pnode_id,
+                &upstream_model,
+                response.status().as_u16(),
                 start.elapsed().as_millis() as u64,
-                false, 0, 0.0, 0, 0, 0, "", "", "",
+                false,
+                0,
+                0.0,
+                0,
+                0,
+                0,
+                "",
+                "",
+                "",
             );
-            Metrics::record_gateway_error(model, ENDPOINT_EMBEDDINGS, metrics_labels::ERROR_BACKEND);
+            Metrics::record_gateway_error(
+                model,
+                ENDPOINT_EMBEDDINGS,
+                metrics_labels::ERROR_BACKEND,
+            );
         }
 
         response
@@ -1628,7 +1989,10 @@ impl RouterTrait for GatewayRouter {
                 return error_responses::bad_request("Missing required field: 'model'");
             }
         };
-        let is_streaming = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_streaming = body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let start = Instant::now();
 
         let provider_id = match extract_provider_id(headers) {
@@ -1636,7 +2000,11 @@ impl RouterTrait for GatewayRouter {
             None => return error_responses::missing_provider_header(),
         };
 
-        Metrics::record_gateway_request(&model, ENDPOINT_RESPONSES, bool_to_static_str(is_streaming));
+        Metrics::record_gateway_request(
+            &model,
+            ENDPOINT_RESPONSES,
+            bool_to_static_str(is_streaming),
+        );
 
         let log_request_body = self.log_request_body;
         let log_sink = self.log_sink.clone();
@@ -1702,22 +2070,34 @@ impl RouterTrait for GatewayRouter {
                     let upstream = match upstream_result {
                         Some(u) => u,
                         None => {
-                            Metrics::record_gateway_error(&model, ENDPOINT_RESPONSES, metrics_labels::ERROR_NO_UPSTREAM);
+                            Metrics::record_gateway_error(
+                                &model,
+                                ENDPOINT_RESPONSES,
+                                metrics_labels::ERROR_NO_UPSTREAM,
+                            );
                             return error_responses::provider_not_found(&provider_id);
                         }
                     };
                     *lp.lock().unwrap() = upstream.base_url().to_string();
                     *lpni.lock().unwrap() = upstream.provider_node_id().to_string();
-                    *lum.lock().unwrap() = upstream.upstream_model_name().unwrap_or(model.as_str()).to_string();
+                    *lum.lock().unwrap() = upstream
+                        .upstream_model_name()
+                        .unwrap_or(model.as_str())
+                        .to_string();
                     let req_body_str = if log_request_body {
                         serde_json::to_string(&attempt_payload).unwrap_or_default()
                     } else {
                         String::new()
                     };
                     let mut req = client.post(&attempt_url).json(&attempt_payload);
-                    let auth_header = attempt_api_key.as_deref()
-                        .and_then(|k| HeaderValue::from_str(&format!("Bearer {}", k)).ok());
-                    req = apply_provider_headers(req, upstream.api_compatibility(), auth_header.as_ref());
+                    let auth_header = attempt_api_key
+                        .as_deref()
+                        .and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok());
+                    req = apply_provider_headers(
+                        req,
+                        upstream.api_compatibility(),
+                        auth_header.as_ref(),
+                    );
 
                     if is_streaming {
                         req = req.header("Accept", "text/event-stream");
@@ -1730,9 +2110,9 @@ impl RouterTrait for GatewayRouter {
                             tracing::Span::current().record("error", e.to_string().as_str());
                             Metrics::record_upstream_request(&model, upstream.base_url(), 0);
                             upstream.circuit_breaker().record_failure();
-                            return error_responses::service_unavailable(
-                                format!("Failed to contact upstream: {}", e),
-                            );
+                            return error_responses::service_unavailable(format!(
+                                "Failed to contact upstream: {e}"
+                            ));
                         }
                     };
 
@@ -1746,18 +2126,25 @@ impl RouterTrait for GatewayRouter {
                         match resp.bytes().await {
                             Ok(body_bytes) => {
                                 let elapsed = send_start.elapsed();
-                                tracing::Span::current().record("latency_ms", elapsed.as_millis() as u64);
-                                Metrics::record_upstream_duration(&model, upstream.base_url(), elapsed);
+                                tracing::Span::current()
+                                    .record("latency_ms", elapsed.as_millis() as u64);
+                                Metrics::record_upstream_duration(
+                                    &model,
+                                    upstream.base_url(),
+                                    elapsed,
+                                );
                                 if status.is_success() {
                                     upstream.circuit_breaker().record_success();
                                     // Responses API uses input_tokens / output_tokens
-                                    let usage = extract_responses_usage_from_json(&body_bytes).unwrap_or_default();
+                                    let usage = extract_responses_usage_from_json(&body_bytes)
+                                        .unwrap_or_default();
                                     if usage.total_tokens > 0 {
                                         if let Some(ref rl) = attempt_rate_limit {
                                             rl.record_tokens(&api_key_id, usage.total_tokens).await;
                                         }
                                     }
-                                    let finish_reason = extract_responses_status_from_json(&body_bytes);
+                                    let finish_reason =
+                                        extract_responses_status_from_json(&body_bytes);
                                     let resp_body_str = if log_request_body {
                                         String::from_utf8_lossy(&body_bytes).into_owned()
                                     } else {
@@ -1765,13 +2152,24 @@ impl RouterTrait for GatewayRouter {
                                     };
                                     emit_access_log(
                                         &log_sink,
-                                        &req_id, &api_key_id, &model, ENDPOINT_RESPONSES,
-                                        upstream.base_url(), upstream.provider_node_id(),
-                                        upstream.upstream_model_name().unwrap_or(model.as_str()), status.as_u16(),
+                                        &req_id,
+                                        &api_key_id,
+                                        &model,
+                                        ENDPOINT_RESPONSES,
+                                        upstream.base_url(),
+                                        upstream.provider_node_id(),
+                                        upstream.upstream_model_name().unwrap_or(model.as_str()),
+                                        status.as_u16(),
                                         elapsed.as_millis() as u64,
-                                        false, 0, 0.0,
-                                        usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
-                                        &finish_reason, &req_body_str, &resp_body_str,
+                                        false,
+                                        0,
+                                        0.0,
+                                        usage.prompt_tokens,
+                                        usage.completion_tokens,
+                                        usage.total_tokens,
+                                        &finish_reason,
+                                        &req_body_str,
+                                        &resp_body_str,
                                     );
                                 } else {
                                     upstream.circuit_breaker().record_failure();
@@ -1786,7 +2184,9 @@ impl RouterTrait for GatewayRouter {
                             Err(e) => {
                                 tracing::Span::current().record("error", e.to_string().as_str());
                                 upstream.circuit_breaker().record_failure();
-                                error_responses::internal_error(format!("Failed to read response: {}", e))
+                                error_responses::internal_error(format!(
+                                    "Failed to read response: {e}"
+                                ))
                             }
                         }
                     } else {
@@ -1801,14 +2201,21 @@ impl RouterTrait for GatewayRouter {
                         let current_span = tracing::Span::current();
                         let provider = upstream.base_url().to_string();
                         let provider_node_id_str = upstream.provider_node_id().to_string();
-                        let upstream_model_str = upstream.upstream_model_name().unwrap_or(model.as_str()).to_string();
+                        let upstream_model_str = upstream
+                            .upstream_model_name()
+                            .unwrap_or(model.as_str())
+                            .to_string();
                         let rate_limit_spawn = attempt_rate_limit.clone();
                         let cb_upstream = Arc::clone(&upstream);
                         tokio::spawn(async move {
                             let mut ttft_ms = 0u64;
                             let mut last_usage = TokenUsage::default();
                             let mut last_finish_reason = String::new();
-                            let mut resp_buf = if log_request_body { Some(Vec::new()) } else { None };
+                            let mut resp_buf = if log_request_body {
+                                Some(Vec::new())
+                            } else {
+                                None
+                            };
                             let mut upstream_error = false;
                             let mut first = true;
                             let mut s = stream;
@@ -1827,7 +2234,8 @@ impl RouterTrait for GatewayRouter {
                                         // Parse only complete lines; partial lines split across
                                         // chunks are buffered until their newline arrives.
                                         line_buf.push(&bytes, |line| {
-                                            let (chunk_usage, _, chunk_status) = parse_responses_sse_chunk(line);
+                                            let (chunk_usage, _, chunk_status) =
+                                                parse_responses_sse_chunk(line);
                                             if let Some(u) = chunk_usage {
                                                 last_usage = u;
                                             }
@@ -1846,14 +2254,15 @@ impl RouterTrait for GatewayRouter {
                                     }
                                     Err(e) => {
                                         upstream_error = true;
-                                        let _ = tx.send(Err(format!("Stream error: {}", e))).await;
+                                        let _ = tx.send(Err(format!("Stream error: {e}"))).await;
                                         break;
                                     }
                                 }
                             }
                             // Parse any trailing partial line left after the stream ends.
                             line_buf.flush(|line| {
-                                let (chunk_usage, _, chunk_status) = parse_responses_sse_chunk(line);
+                                let (chunk_usage, _, chunk_status) =
+                                    parse_responses_sse_chunk(line);
                                 if let Some(u) = chunk_usage {
                                     last_usage = u;
                                 }
@@ -1874,7 +2283,8 @@ impl RouterTrait for GatewayRouter {
                                 }
                             }
                             let total_ms = send_start.elapsed().as_millis() as u64;
-                            let tpot_ms = if last_usage.completion_tokens > 0 && total_ms > ttft_ms {
+                            let tpot_ms = if last_usage.completion_tokens > 0 && total_ms > ttft_ms
+                            {
                                 (total_ms - ttft_ms) as f64 / last_usage.completion_tokens as f64
                             } else {
                                 0.0
@@ -1887,11 +2297,24 @@ impl RouterTrait for GatewayRouter {
                                 .unwrap_or_default();
                             emit_access_log(
                                 &log_sink,
-                                &req_id, &api_key_id, &model, ENDPOINT_RESPONSES,
-                                &provider, &provider_node_id_str, &upstream_model_str, status_code_u16,
-                                total_ms, true, ttft_ms, tpot_ms,
-                                last_usage.prompt_tokens, last_usage.completion_tokens, last_usage.total_tokens,
-                                &last_finish_reason, &req_body_str, &resp_body_str,
+                                &req_id,
+                                &api_key_id,
+                                &model,
+                                ENDPOINT_RESPONSES,
+                                &provider,
+                                &provider_node_id_str,
+                                &upstream_model_str,
+                                status_code_u16,
+                                total_ms,
+                                true,
+                                ttft_ms,
+                                tpot_ms,
+                                last_usage.prompt_tokens,
+                                last_usage.completion_tokens,
+                                last_usage.total_tokens,
+                                &last_finish_reason,
+                                &req_body_str,
+                                &resp_body_str,
                             );
                         });
 
@@ -1903,7 +2326,8 @@ impl RouterTrait for GatewayRouter {
                             .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
                         response
                     }
-                }.instrument(upstream_span)
+                }
+                .instrument(upstream_span)
             },
             |res, _attempt| is_retryable_status(res.status()),
             |_delay, _next_attempt, status_code| {
@@ -1923,12 +2347,30 @@ impl RouterTrait for GatewayRouter {
             let upstream_model = last_upstream_model.lock().unwrap().clone();
             emit_access_log(
                 &log_sink,
-                &req_id, &api_key_id, &model, ENDPOINT_RESPONSES,
-                &provider, &pnode_id, &upstream_model, response.status().as_u16(),
+                &req_id,
+                &api_key_id,
+                &model,
+                ENDPOINT_RESPONSES,
+                &provider,
+                &pnode_id,
+                &upstream_model,
+                response.status().as_u16(),
                 start.elapsed().as_millis() as u64,
-                is_streaming, 0, 0.0, 0, 0, 0, "", "", "",
+                is_streaming,
+                0,
+                0.0,
+                0,
+                0,
+                0,
+                "",
+                "",
+                "",
             );
-            Metrics::record_gateway_error(&model, ENDPOINT_RESPONSES, metrics_labels::ERROR_BACKEND);
+            Metrics::record_gateway_error(
+                &model,
+                ENDPOINT_RESPONSES,
+                metrics_labels::ERROR_BACKEND,
+            );
         }
 
         response
@@ -1951,7 +2393,7 @@ impl RouterTrait for GatewayRouter {
         self.proxy_request(
             reqwest::Method::GET,
             upstream,
-            &format!("/responses/{}", response_id),
+            &format!("/responses/{response_id}"),
             "",
             "responses",
             ENDPOINT_RESPONSES_RETRIEVE,
@@ -1977,7 +2419,7 @@ impl RouterTrait for GatewayRouter {
         self.proxy_request(
             reqwest::Method::DELETE,
             upstream,
-            &format!("/responses/{}", response_id),
+            &format!("/responses/{response_id}"),
             "",
             "responses",
             ENDPOINT_RESPONSES_DELETE,
@@ -2004,7 +2446,7 @@ impl RouterTrait for GatewayRouter {
         self.proxy_request(
             reqwest::Method::GET,
             upstream,
-            &format!("/responses/{}/input_items", response_id),
+            &format!("/responses/{response_id}/input_items"),
             query_string,
             "responses",
             ENDPOINT_RESPONSES_INPUT_ITEMS,
@@ -2024,7 +2466,10 @@ mod tests {
     fn usage_from_json_openai() {
         let body = br#"{"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}"#;
         let u = extract_usage_from_json(body).unwrap();
-        assert_eq!((u.prompt_tokens, u.completion_tokens, u.total_tokens), (10, 20, 30));
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.total_tokens),
+            (10, 20, 30)
+        );
     }
 
     #[test]
@@ -2045,7 +2490,10 @@ mod tests {
     fn usage_from_json_anthropic() {
         let body = br#"{"type":"message","usage":{"input_tokens":27,"output_tokens":467}}"#;
         let u = extract_anthropic_usage_from_json(body).unwrap();
-        assert_eq!((u.prompt_tokens, u.completion_tokens, u.total_tokens), (27, 467, 494));
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.total_tokens),
+            (27, 467, 494)
+        );
     }
 
     // ── extract_responses_usage_from_json ─────────────────────────────────────
@@ -2054,7 +2502,10 @@ mod tests {
     fn usage_from_json_responses_api() {
         let body = br#"{"status":"completed","usage":{"input_tokens":49,"output_tokens":957,"total_tokens":1006}}"#;
         let u = extract_responses_usage_from_json(body).unwrap();
-        assert_eq!((u.prompt_tokens, u.completion_tokens, u.total_tokens), (49, 957, 1006));
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.total_tokens),
+            (49, 957, 1006)
+        );
     }
 
     // ── finish_reason extraction (non-streaming) ──────────────────────────────
@@ -2089,13 +2540,17 @@ mod tests {
     fn sse_usage_openai_with_space_after_data() {
         let chunk = b"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n";
         let u = extract_usage_from_sse_chunk(chunk).unwrap();
-        assert_eq!((u.prompt_tokens, u.completion_tokens, u.total_tokens), (10, 5, 15));
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.total_tokens),
+            (10, 5, 15)
+        );
     }
 
     #[test]
     fn sse_usage_openai_no_space_after_data() {
         // DashScope omits the space after data:
-        let chunk = b"data:{\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4,\"total_tokens\":12}}\n";
+        let chunk =
+            b"data:{\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4,\"total_tokens\":12}}\n";
         let u = extract_usage_from_sse_chunk(chunk).unwrap();
         assert_eq!((u.prompt_tokens, u.completion_tokens), (8, 4));
     }
@@ -2131,7 +2586,14 @@ mod tests {
                 last = u;
             }
         });
-        assert_eq!((last.prompt_tokens, last.completion_tokens, last.total_tokens), (10, 5, 15));
+        assert_eq!(
+            (
+                last.prompt_tokens,
+                last.completion_tokens,
+                last.total_tokens
+            ),
+            (10, 5, 15)
+        );
     }
 
     #[test]
@@ -2147,13 +2609,23 @@ mod tests {
                 }
             },
         );
-        assert_eq!(last.total_tokens, 0, "no newline yet → buffered, not parsed");
+        assert_eq!(
+            last.total_tokens, 0,
+            "no newline yet → buffered, not parsed"
+        );
         buf.flush(|line| {
             if let Some(u) = extract_usage_from_sse_chunk(line) {
                 last = u;
             }
         });
-        assert_eq!((last.prompt_tokens, last.completion_tokens, last.total_tokens), (3, 7, 10));
+        assert_eq!(
+            (
+                last.prompt_tokens,
+                last.completion_tokens,
+                last.total_tokens
+            ),
+            (3, 7, 10)
+        );
     }
 
     #[test]
@@ -2162,7 +2634,10 @@ mod tests {
         // boundary. Byte-level buffering must not corrupt or drop the line.
         let full = "data: {\"content\":\"—\",\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n".as_bytes().to_vec();
         // Split inside the em-dash bytes.
-        let dash_pos = full.windows(3).position(|w| w == [0xE2, 0x80, 0x94]).unwrap();
+        let dash_pos = full
+            .windows(3)
+            .position(|w| w == [0xE2, 0x80, 0x94])
+            .unwrap();
         let (a, b) = full.split_at(dash_pos + 1);
 
         let mut buf = SseLineBuffer::new();
@@ -2184,7 +2659,10 @@ mod tests {
         // Real DashScope Anthropic SSE: no space after event:/data:
         let chunk = b"event:message_delta\ndata:{\"delta\":{\"stop_reason\":\"end_turn\"},\"type\":\"message_delta\",\"usage\":{\"output_tokens\":467,\"input_tokens\":27}}\n";
         let u = extract_anthropic_usage_from_sse_chunk(chunk).unwrap();
-        assert_eq!((u.prompt_tokens, u.completion_tokens, u.total_tokens), (27, 467, 494));
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.total_tokens),
+            (27, 467, 494)
+        );
     }
 
     #[test]
@@ -2205,19 +2683,28 @@ mod tests {
 
     #[test]
     fn sse_finish_reason_openai_stop() {
-        let chunk = b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}]}\n";
-        assert_eq!(extract_finish_reason_from_sse_chunk(chunk).as_deref(), Some("stop"));
+        let chunk =
+            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}]}\n";
+        assert_eq!(
+            extract_finish_reason_from_sse_chunk(chunk).as_deref(),
+            Some("stop")
+        );
     }
 
     #[test]
     fn sse_finish_reason_openai_length_no_space() {
-        let chunk = b"data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"length\",\"index\":0}]}\n";
-        assert_eq!(extract_finish_reason_from_sse_chunk(chunk).as_deref(), Some("length"));
+        let chunk =
+            b"data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"length\",\"index\":0}]}\n";
+        assert_eq!(
+            extract_finish_reason_from_sse_chunk(chunk).as_deref(),
+            Some("length")
+        );
     }
 
     #[test]
     fn sse_finish_reason_openai_null_not_returned() {
-        let chunk = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n";
+        let chunk =
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n";
         assert!(extract_finish_reason_from_sse_chunk(chunk).is_none());
     }
 
@@ -2226,13 +2713,19 @@ mod tests {
     #[test]
     fn sse_finish_reason_anthropic_end_turn() {
         let chunk = b"event:message_delta\ndata:{\"delta\":{\"stop_reason\":\"end_turn\"},\"type\":\"message_delta\",\"usage\":{\"output_tokens\":467,\"input_tokens\":27}}\n";
-        assert_eq!(extract_anthropic_finish_reason_from_sse_chunk(chunk).as_deref(), Some("end_turn"));
+        assert_eq!(
+            extract_anthropic_finish_reason_from_sse_chunk(chunk).as_deref(),
+            Some("end_turn")
+        );
     }
 
     #[test]
     fn sse_finish_reason_anthropic_max_tokens() {
         let chunk = b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":100,\"input_tokens\":10}}\n";
-        assert_eq!(extract_anthropic_finish_reason_from_sse_chunk(chunk).as_deref(), Some("max_tokens"));
+        assert_eq!(
+            extract_anthropic_finish_reason_from_sse_chunk(chunk).as_deref(),
+            Some("max_tokens")
+        );
     }
 
     // ── parse_responses_sse_chunk ─────────────────────────────────────────────
@@ -2250,7 +2743,10 @@ mod tests {
         );
         let (usage, _id, status) = parse_responses_sse_chunk(chunk.as_bytes());
         let u = usage.unwrap();
-        assert_eq!((u.prompt_tokens, u.completion_tokens, u.total_tokens), (49, 957, 1006));
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.total_tokens),
+            (49, 957, 1006)
+        );
         assert_eq!(status.as_deref(), Some("completed"));
     }
 
@@ -2316,7 +2812,10 @@ mod tests {
         );
         let (usage, _id, status) = parse_responses_sse_chunk(chunk.as_bytes());
         let u = usage.expect("usage should be extracted from flat format");
-        assert_eq!((u.prompt_tokens, u.completion_tokens, u.total_tokens), (10, 5, 15));
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.total_tokens),
+            (10, 5, 15)
+        );
         assert_eq!(status.as_deref(), Some("completed"));
     }
 

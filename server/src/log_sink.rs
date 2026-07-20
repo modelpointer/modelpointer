@@ -3,13 +3,13 @@ use std::time::Duration;
 use sqlx::AnyPool;
 use tokio::sync::mpsc;
 
-use crate::db::{DatabaseDialect, access_log_store};
 pub use crate::db::access_log_store::AccessLogRecord;
+use crate::db::{DatabaseDialect, access_log_store};
 
 const CHANNEL_SIZE: usize = 4096;
-const BATCH_SIZE:   usize = 100;
-const FLUSH_INTERVAL_SECS:     u64 = 1;
-const PARTITION_CHECK_SECS:    u64 = 3600; // hourly — ensure next day's partition exists
+const BATCH_SIZE: usize = 100;
+const FLUSH_INTERVAL_SECS: u64 = 1;
+const PARTITION_CHECK_SECS: u64 = 3600; // hourly — ensure next day's partition exists
 
 // ── LogSink ───────────────────────────────────────────────────────────────────
 
@@ -45,7 +45,7 @@ impl LogSink {
 pub struct LogWriter {
     /// One extra sender kept alive so the task does not exit before we call
     /// `shutdown`.  Dropping it closes the channel from our side.
-    _tx:  mpsc::Sender<AccessLogRecord>,
+    _tx: mpsc::Sender<AccessLogRecord>,
     join: tokio::task::JoinHandle<()>,
 }
 
@@ -54,7 +54,7 @@ impl LogWriter {
     pub fn noop() -> Self {
         // Spawn a task that does nothing so `join` is always valid.
         Self {
-            _tx:  mpsc::channel(1).0,
+            _tx: mpsc::channel(1).0,
             join: tokio::spawn(async {}),
         }
     }
@@ -91,7 +91,13 @@ pub async fn start(
     let writer_tx = tx.clone();
     let join = tokio::spawn(writer_task(pool, dialect, rx));
 
-    Ok((LogSink { tx: Some(tx) }, LogWriter { _tx: writer_tx, join }))
+    Ok((
+        LogSink { tx: Some(tx) },
+        LogWriter {
+            _tx: writer_tx,
+            join,
+        },
+    ))
 }
 
 async fn writer_task(

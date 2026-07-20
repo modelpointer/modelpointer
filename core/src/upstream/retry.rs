@@ -123,7 +123,12 @@ impl RetryExecutor {
             let next_attempt = attempt + 1;
             let delay = BackoffCalculator::calculate_delay(config, attempt);
             let status_code = response.status().as_u16();
-            debug!(attempt, next_attempt, delay_ms = delay.as_millis() as u64, "Retry backoff");
+            debug!(
+                attempt,
+                next_attempt,
+                delay_ms = delay.as_millis() as u64,
+                "Retry backoff"
+            );
             tracing::info!(
                 target: "modelpointer::otel-trace",
                 attempt,
@@ -143,8 +148,8 @@ impl RetryExecutor {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        atomic::{AtomicU32, Ordering},
         Arc,
+        atomic::{AtomicU32, Ordering},
     };
 
     use axum::{http::StatusCode, response::IntoResponse};

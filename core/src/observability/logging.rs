@@ -10,6 +10,8 @@
 
 use std::path::PathBuf;
 
+use super::otel_trace::get_otel_layer;
+use crate::config::TraceConfig;
 use tracing::Level;
 use tracing_appender::{
     non_blocking::WorkerGuard,
@@ -17,10 +19,8 @@ use tracing_appender::{
 };
 use tracing_log::LogTracer;
 use tracing_subscriber::{
-    fmt::time::ChronoUtc, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
+    EnvFilter, Layer, fmt::time::ChronoUtc, layer::SubscriberExt, util::SubscriberInitExt,
 };
-use super::otel_trace::get_otel_layer;
-use crate::config::TraceConfig;
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const DEFAULT_LOG_TARGET: &str = "modelpointer";
@@ -123,7 +123,7 @@ pub fn init_logging(config: LoggingConfig, otel_layer_config: Option<TraceConfig
 
         if !log_dir.exists() {
             if let Err(e) = std::fs::create_dir_all(&log_dir) {
-                eprintln!("Failed to create log directory: {}", e);
+                eprintln!("Failed to create log directory: {e}");
                 return LogGuard { _file_guard: None };
             }
         }
@@ -157,7 +157,7 @@ pub fn init_logging(config: LoggingConfig, otel_layer_config: Option<TraceConfig
                     layers.push(otel_layer);
                 }
                 Err(e) => {
-                    eprintln!("Failed to initialize OpenTelemetry: {}", e);
+                    eprintln!("Failed to initialize OpenTelemetry: {e}");
                 }
             }
         }

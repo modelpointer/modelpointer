@@ -41,7 +41,9 @@ fn is_denied(d: &RateLimitDecision) -> bool {
 
 #[tokio::test]
 async fn rpm_within_limit_allows() {
-    let Some(rl) = make_limiter(60).await else { return };
+    let Some(rl) = make_limiter(60).await else {
+        return;
+    };
     let key = unique_key();
     for _ in 0..5 {
         assert!(is_allowed(&rl.check_rpm(&key, 5).await));
@@ -50,7 +52,9 @@ async fn rpm_within_limit_allows() {
 
 #[tokio::test]
 async fn rpm_over_limit_denies() {
-    let Some(rl) = make_limiter(60).await else { return };
+    let Some(rl) = make_limiter(60).await else {
+        return;
+    };
     let key = unique_key();
     for _ in 0..5 {
         rl.check_rpm(&key, 5).await;
@@ -60,7 +64,9 @@ async fn rpm_over_limit_denies() {
 
 #[tokio::test]
 async fn rpm_denied_includes_retry_after_secs() {
-    let Some(rl) = make_limiter(60).await else { return };
+    let Some(rl) = make_limiter(60).await else {
+        return;
+    };
     let key = unique_key();
     for _ in 0..3 {
         rl.check_rpm(&key, 3).await;
@@ -73,7 +79,9 @@ async fn rpm_denied_includes_retry_after_secs() {
 
 #[tokio::test]
 async fn rpm_different_keys_are_independent() {
-    let Some(rl) = make_limiter(60).await else { return };
+    let Some(rl) = make_limiter(60).await else {
+        return;
+    };
     let key_a = unique_key();
     let key_b = unique_key();
     for _ in 0..3 {
@@ -87,8 +95,12 @@ async fn rpm_different_keys_are_independent() {
 /// over the in-memory implementation.
 #[tokio::test]
 async fn rpm_two_instances_share_state() {
-    let Some(rl_a) = make_limiter(60).await else { return };
-    let Some(rl_b) = make_limiter(60).await else { return };
+    let Some(rl_a) = make_limiter(60).await else {
+        return;
+    };
+    let Some(rl_b) = make_limiter(60).await else {
+        return;
+    };
     let key = unique_key();
 
     // Instance A consumes 3 slots
@@ -101,7 +113,9 @@ async fn rpm_two_instances_share_state() {
 
 #[tokio::test]
 async fn rpm_window_resets_after_expiry() {
-    let Some(rl) = make_limiter(1).await else { return }; // 1-second window
+    let Some(rl) = make_limiter(1).await else {
+        return;
+    }; // 1-second window
     let key = unique_key();
     for _ in 0..3 {
         rl.check_rpm(&key, 3).await;
@@ -117,7 +131,9 @@ async fn rpm_window_resets_after_expiry() {
 
 #[tokio::test]
 async fn tpm_within_limit_allows() {
-    let Some(rl) = make_limiter(60).await else { return };
+    let Some(rl) = make_limiter(60).await else {
+        return;
+    };
     let key = unique_key();
     rl.record_tokens(&key, 100).await;
     assert!(is_allowed(&rl.check_tpm(&key, 200).await));
@@ -125,7 +141,9 @@ async fn tpm_within_limit_allows() {
 
 #[tokio::test]
 async fn tpm_at_limit_denies() {
-    let Some(rl) = make_limiter(60).await else { return };
+    let Some(rl) = make_limiter(60).await else {
+        return;
+    };
     let key = unique_key();
     rl.record_tokens(&key, 200).await;
     assert!(is_denied(&rl.check_tpm(&key, 200).await));
@@ -133,7 +151,9 @@ async fn tpm_at_limit_denies() {
 
 #[tokio::test]
 async fn tpm_tokens_accumulate_across_records() {
-    let Some(rl) = make_limiter(60).await else { return };
+    let Some(rl) = make_limiter(60).await else {
+        return;
+    };
     let key = unique_key();
     rl.record_tokens(&key, 80).await;
     rl.record_tokens(&key, 80).await;
@@ -144,8 +164,12 @@ async fn tpm_tokens_accumulate_across_records() {
 /// Two instances writing tokens to the same key should see a combined total.
 #[tokio::test]
 async fn tpm_two_instances_share_state() {
-    let Some(rl_a) = make_limiter(60).await else { return };
-    let Some(rl_b) = make_limiter(60).await else { return };
+    let Some(rl_a) = make_limiter(60).await else {
+        return;
+    };
+    let Some(rl_b) = make_limiter(60).await else {
+        return;
+    };
     let key = unique_key();
 
     rl_a.record_tokens(&key, 100).await;
@@ -159,7 +183,9 @@ async fn tpm_two_instances_share_state() {
 
 #[tokio::test]
 async fn tpm_zero_tokens_not_recorded() {
-    let Some(rl) = make_limiter(60).await else { return };
+    let Some(rl) = make_limiter(60).await else {
+        return;
+    };
     let key = unique_key();
     rl.record_tokens(&key, 0).await;
     assert!(is_allowed(&rl.check_tpm(&key, 1).await));
@@ -167,7 +193,9 @@ async fn tpm_zero_tokens_not_recorded() {
 
 #[tokio::test]
 async fn tpm_window_resets_after_expiry() {
-    let Some(rl) = make_limiter(1).await else { return }; // 1-second window
+    let Some(rl) = make_limiter(1).await else {
+        return;
+    }; // 1-second window
     let key = unique_key();
     rl.record_tokens(&key, 500).await;
     assert!(is_denied(&rl.check_tpm(&key, 499).await));

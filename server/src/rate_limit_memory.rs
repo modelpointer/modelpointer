@@ -124,23 +124,27 @@ impl MemoryRateLimiter {
 
     fn rpm_key(key: &RateLimitKey) -> String {
         match key {
-            RateLimitKey::KeyModel { api_key_id, model_id } =>
-                format!("rl:key:{}:model:{}:rpm", api_key_id, model_id),
-            RateLimitKey::Model { model_id } =>
-                format!("rl:model:{}:rpm", model_id),
-            RateLimitKey::PrimaryTier { model_id, protocol } =>
-                format!("rl:model:{}:proto:{}:primary:rpm", model_id, protocol),
+            RateLimitKey::KeyModel {
+                api_key_id,
+                model_id,
+            } => format!("rl:key:{api_key_id}:model:{model_id}:rpm"),
+            RateLimitKey::Model { model_id } => format!("rl:model:{model_id}:rpm"),
+            RateLimitKey::PrimaryTier { model_id, protocol } => {
+                format!("rl:model:{model_id}:proto:{protocol}:primary:rpm")
+            }
         }
     }
 
     fn tpm_key(key: &RateLimitKey) -> String {
         match key {
-            RateLimitKey::KeyModel { api_key_id, model_id } =>
-                format!("rl:key:{}:model:{}:tpm", api_key_id, model_id),
-            RateLimitKey::Model { model_id } =>
-                format!("rl:model:{}:tpm", model_id),
-            RateLimitKey::PrimaryTier { model_id, protocol } =>
-                format!("rl:model:{}:proto:{}:primary:tpm", model_id, protocol),
+            RateLimitKey::KeyModel {
+                api_key_id,
+                model_id,
+            } => format!("rl:key:{api_key_id}:model:{model_id}:tpm"),
+            RateLimitKey::Model { model_id } => format!("rl:model:{model_id}:tpm"),
+            RateLimitKey::PrimaryTier { model_id, protocol } => {
+                format!("rl:model:{model_id}:proto:{protocol}:primary:tpm")
+            }
         }
     }
 
@@ -148,7 +152,8 @@ impl MemoryRateLimiter {
     /// The DashMap shard lock is released before the inner Mutex is acquired.
     fn rpm_window(&self, key: &str) -> RpmWindow {
         Arc::clone(
-            &*self.rpm_windows
+            &*self
+                .rpm_windows
                 .entry(key.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(VecDeque::new()))),
         )
@@ -157,7 +162,8 @@ impl MemoryRateLimiter {
     /// Get the TPM window for `key`, creating it on first access.
     fn tpm_window(&self, key: &str) -> TpmWindow {
         Arc::clone(
-            &*self.tpm_windows
+            &*self
+                .tpm_windows
                 .entry(key.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(VecDeque::new()))),
         )
@@ -294,7 +300,9 @@ mod tests {
     async fn rpm_key_model_and_model_buckets_are_independent() {
         let rl = MemoryRateLimiter::new(60);
         let key_model_key = key_model();
-        let model_only_key = RateLimitKey::Model { model_id: "gpt-4o".to_string() };
+        let model_only_key = RateLimitKey::Model {
+            model_id: "gpt-4o".to_string(),
+        };
         for _ in 0..3 {
             rl.check_rpm(&key_model_key, 3).await;
         }
@@ -430,10 +438,16 @@ mod tests {
         for _ in 0..3 {
             rl.check_rpm(&openai_key, 3).await;
         }
-        assert!(is_denied(&rl.check_rpm(&openai_key, 3).await), "openai bucket should be full");
+        assert!(
+            is_denied(&rl.check_rpm(&openai_key, 3).await),
+            "openai bucket should be full"
+        );
 
         // Anthropic bucket is independent — still allows requests.
-        assert!(is_allowed(&rl.check_rpm(&anthropic_key, 3).await), "anthropic bucket must be independent");
+        assert!(
+            is_allowed(&rl.check_rpm(&anthropic_key, 3).await),
+            "anthropic bucket must be independent"
+        );
     }
 
     #[tokio::test]
@@ -461,7 +475,8 @@ mod tests {
         // active_key has a fresh timestamp → retained; stale_key has none → removed.
         assert_eq!(rl.rpm_windows.len(), 1, "only active key should remain");
         assert!(
-            rl.rpm_windows.contains_key("rl:key:active:model:gpt-4o:rpm"),
+            rl.rpm_windows
+                .contains_key("rl:key:active:model:gpt-4o:rpm"),
             "active key must be present"
         );
     }

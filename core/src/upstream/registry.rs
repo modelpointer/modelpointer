@@ -17,19 +17,16 @@ use std::{
 
 use arc_swap::ArcSwap;
 
-use crate::{
-    model::ModelCard,
-    upstream::{
-        node::{ApiCompatibility, UpstreamBinding, UpstreamGroup, UpstreamNode, RuntimeType},
-        routing::RoutingStrategyConfig,
-        Upstream,
-    },
+use crate::upstream::{
+    Upstream,
+    node::{ApiCompatibility, RuntimeType, UpstreamBinding, UpstreamGroup},
+    routing::RoutingStrategyConfig,
 };
 
 /// Build the composite registry key from a model id and protocol string.
 /// Uses a null byte as separator — neither model IDs nor protocol names contain one.
 fn group_key(model_id: &str, protocol: &str) -> String {
-    format!("{}\x00{}", model_id, protocol)
+    format!("{model_id}\x00{protocol}")
 }
 
 /// A consistent snapshot of both indexes.
@@ -186,7 +183,14 @@ impl UpstreamRegistry {
             .map(|ac| ac.to_string())
             .unwrap_or_else(|| "openai".to_string());
         self.get_protocol_group(model_id, &protocol)
-            .and_then(|group| group.select_with_min_priority(routing_key, runtime_type, api_compatibility, min_priority))
+            .and_then(|group| {
+                group.select_with_min_priority(
+                    routing_key,
+                    runtime_type,
+                    api_compatibility,
+                    min_priority,
+                )
+            })
     }
 
     /// Find an upstream for the given model by exact provider_id match (credential name).
@@ -225,18 +229,30 @@ impl UpstreamRegistry {
 
     /// Return the (key_rpm, key_tpm, model_rpm, model_tpm) configured for a model.
     /// Rate limits are model-level; any protocol group carries the same values.
-    pub fn get_rate_limits(&self, model_id: &str) -> (Option<u32>, Option<u32>, Option<u32>, Option<u32>) {
+    pub fn get_rate_limits(
+        &self,
+        model_id: &str,
+    ) -> (Option<u32>, Option<u32>, Option<u32>, Option<u32>) {
         let snap = self.snapshot.load();
         for protocol in ["openai", "anthropic"] {
             if let Some(g) = snap.groups.get(&group_key(model_id, protocol)) {
-                return (g.key_rpm_limit, g.key_tpm_limit, g.model_rpm_limit, g.model_tpm_limit);
+                return (
+                    g.key_rpm_limit,
+                    g.key_tpm_limit,
+                    g.model_rpm_limit,
+                    g.model_tpm_limit,
+                );
             }
         }
         (None, None, None, None)
     }
 
     /// Return the (primary_capacity_rpm, primary_capacity_tpm) for a specific protocol.
-    pub fn get_primary_capacity(&self, model_id: &str, protocol: &str) -> (Option<u32>, Option<u32>) {
+    pub fn get_primary_capacity(
+        &self,
+        model_id: &str,
+        protocol: &str,
+    ) -> (Option<u32>, Option<u32>) {
         self.get_protocol_group(model_id, protocol)
             .map(|g| (g.primary_capacity_rpm, g.primary_capacity_tpm))
             .unwrap_or((None, None))
@@ -289,7 +305,8 @@ mod tests {
     use std::thread;
 
     use super::*;
-    use crate::upstream::node::{UpstreamCredential, UpstreamProfile, ProviderType};
+    use crate::model::ModelCard;
+    use crate::upstream::node::{ProviderType, UpstreamCredential, UpstreamNode, UpstreamProfile};
 
     /// Creates an OpenAI-protocol group (uses `UpstreamNode::default()`, which is OpenAI).
     fn group(id: &str) -> UpstreamGroup {
@@ -305,6 +322,7 @@ mod tests {
         let node = UpstreamNode {
             profile: UpstreamProfile {
                 base_url: "http://anthropic.example.com".to_string(),
+                provider_node_id: String::new(),
                 api_compatibility: ApiCompatibility::Anthropic,
                 runtime_type: RuntimeType::External,
                 credential: Arc::new(UpstreamCredential {
@@ -371,11 +389,18 @@ mod tests {
         registry.register(anthropic_group("claude-3")).unwrap();
 
         // Each protocol maps to its own distinct group.
-        let og = registry.get_protocol_group("claude-3", "openai").expect("openai group missing");
-        let ag = registry.get_protocol_group("claude-3", "anthropic").expect("anthropic group missing");
+        let og = registry
+            .get_protocol_group("claude-3", "openai")
+            .expect("openai group missing");
+        let ag = registry
+            .get_protocol_group("claude-3", "anthropic")
+            .expect("anthropic group missing");
 
         // They are different Arc instances (distinct UpstreamGroups).
-        assert!(!Arc::ptr_eq(&og, &ag), "openai and anthropic groups must be separate Arc instances");
+        assert!(
+            !Arc::ptr_eq(&og, &ag),
+            "openai and anthropic groups must be separate Arc instances"
+        );
 
         // Protocol inferred from each group's binding matches the expected value.
         assert_eq!(infer_protocol(&og), "openai");
@@ -407,6 +432,10 @@ mod tests {
         registry.register(anthropic_group("dedup-model")).unwrap();
 
         let ids = registry.all_model_ids();
-        assert_eq!(ids, vec!["dedup-model"], "model id should appear once even with two protocols");
+        assert_eq!(
+            ids,
+            vec!["dedup-model"],
+            "model id should appear once even with two protocols"
+        );
     }
 }

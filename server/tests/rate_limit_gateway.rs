@@ -7,14 +7,14 @@
 //! Requires a running Redis at `REDIS_URL` (default: redis://127.0.0.1:6379).
 //! Tests are skipped automatically when Redis is unreachable.
 
-use std::sync::{atomic::AtomicBool, Arc, OnceLock};
+use std::sync::{Arc, OnceLock, atomic::AtomicBool};
 
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
     response::Response,
     routing::post,
-    Router,
 };
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -27,7 +27,7 @@ use modelpointer::{
     quota_config::QuotaStore,
     rate_limit_redis::RedisRateLimiter,
     router::GatewayRouter,
-    server::{build_app, GatewayState},
+    server::{GatewayState, build_app},
 };
 use modelpointer_core::{
     app_context::AppContext,
@@ -35,8 +35,8 @@ use modelpointer_core::{
     model::ModelCard,
     rate_limit::RateLimiter,
     upstream::node::{
-        ApiCompatibility, RuntimeType, UpstreamBinding, UpstreamCredential, UpstreamGroup,
-        UpstreamNode, UpstreamProfile, ProviderType,
+        ApiCompatibility, ProviderType, RuntimeType, UpstreamBinding, UpstreamCredential,
+        UpstreamGroup, UpstreamNode, UpstreamProfile,
     },
     upstream::routing::{RoutingStrategy, RoutingStrategyConfig},
 };
@@ -67,7 +67,11 @@ async fn try_redis_limiter(window_secs: u64) -> Option<Arc<dyn RateLimiter>> {
 // ── Mock upstream ─────────────────────────────────────────────────────────────
 
 /// Spawn a mock upstream and return its base URL.
-async fn spawn_mock_upstream(status: u16, content_type: &'static str, body: &'static str) -> String {
+async fn spawn_mock_upstream(
+    status: u16,
+    content_type: &'static str,
+    body: &'static str,
+) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = Router::new().route(
@@ -111,6 +115,7 @@ async fn make_gateway_with_rl(
     let node = UpstreamNode {
         profile: UpstreamProfile {
             base_url: upstream_base_url.to_string(),
+            provider_node_id: String::new(),
             api_compatibility: ApiCompatibility::OpenAi,
             runtime_type: RuntimeType::External,
             upstream_model_name: None,
@@ -172,19 +177,25 @@ async fn make_two_tier_gateway(
         let node = UpstreamNode {
             profile: UpstreamProfile {
                 base_url: url.to_string(),
+                provider_node_id: String::new(),
                 api_compatibility: ApiCompatibility::OpenAi,
                 runtime_type: RuntimeType::External,
                 upstream_model_name: None,
                 credential: Arc::new(UpstreamCredential {
-                    name: format!("mock-{}", priority),
+                    name: format!("mock-{priority}"),
                     api_key: None,
                     provider_type: ProviderType::Unknown,
                 }),
             },
             healthy: Arc::new(AtomicBool::new(true)),
         };
-        UpstreamBinding::new(node, true, RoutingStrategyConfig::Swrr { weight: 1 }, priority)
-            .unwrap()
+        UpstreamBinding::new(
+            node,
+            true,
+            RoutingStrategyConfig::Swrr { weight: 1 },
+            priority,
+        )
+        .unwrap()
     };
 
     let group = UpstreamGroup::new(
@@ -214,10 +225,7 @@ async fn make_two_tier_gateway(
 
 /// Send a non-streaming chat POST for the given `model` name.
 async fn chat_post(app: Router, model: &str) -> axum::response::Response {
-    let body = format!(
-        r#"{{"model":"{}","messages":[{{"role":"user","content":"hi"}}]}}"#,
-        model
-    );
+    let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}]}}"#);
     let req = Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")
@@ -249,7 +257,9 @@ const NON_STREAM_BODY: &str = r#"{
 /// RPM limit of 2: the 3rd request in the same window must be denied.
 #[tokio::test]
 async fn redis_rpm_third_request_returns_429() {
-    let Some(rl) = try_redis_limiter(60).await else { return };
+    let Some(rl) = try_redis_limiter(60).await else {
+        return;
+    };
 
     // Unique model name → unique Redis key → tests don't interfere with each other.
     let model = format!("rpm-test-{}", Uuid::new_v4());
@@ -263,13 +273,19 @@ async fn redis_rpm_third_request_returns_429() {
     assert_eq!(r2.status(), StatusCode::OK, "2nd request should succeed");
 
     let r3 = chat_post(app.clone(), &model).await;
-    assert_eq!(r3.status(), StatusCode::TOO_MANY_REQUESTS, "3rd request should be rate-limited");
+    assert_eq!(
+        r3.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "3rd request should be rate-limited"
+    );
 }
 
 /// The 429 response must include a `Retry-After` header.
 #[tokio::test]
 async fn redis_rpm_429_includes_retry_after_header() {
-    let Some(rl) = try_redis_limiter(60).await else { return };
+    let Some(rl) = try_redis_limiter(60).await else {
+        return;
+    };
 
     let model = format!("rpm-retry-{}", Uuid::new_v4());
     let upstream_url = spawn_mock_upstream(200, "application/json", NON_STREAM_BODY).await;
@@ -289,7 +305,9 @@ async fn redis_rpm_429_includes_retry_after_header() {
 /// The 429 error body must describe the violated limit.
 #[tokio::test]
 async fn redis_rpm_429_body_describes_limit() {
-    let Some(rl) = try_redis_limiter(60).await else { return };
+    let Some(rl) = try_redis_limiter(60).await else {
+        return;
+    };
 
     let model = format!("rpm-body-{}", Uuid::new_v4());
     let upstream_url = spawn_mock_upstream(200, "application/json", NON_STREAM_BODY).await;
@@ -299,14 +317,22 @@ async fn redis_rpm_429_body_describes_limit() {
     let denied = chat_post(app.clone(), &model).await;
 
     let text = body_text(denied).await;
-    assert!(text.contains("rate_limit"), "body should mention rate_limit: {text}");
-    assert!(text.contains("key_rpm"), "body should identify the dimension (key_rpm): {text}");
+    assert!(
+        text.contains("rate_limit"),
+        "body should mention rate_limit: {text}"
+    );
+    assert!(
+        text.contains("key_rpm"),
+        "body should identify the dimension (key_rpm): {text}"
+    );
 }
 
 /// Two different models have independent rate-limit buckets.
 #[tokio::test]
 async fn redis_rpm_different_models_are_independent() {
-    let Some(rl) = try_redis_limiter(60).await else { return };
+    let Some(rl) = try_redis_limiter(60).await else {
+        return;
+    };
 
     let model_a = format!("rpm-indep-a-{}", Uuid::new_v4());
     let model_b = format!("rpm-indep-b-{}", Uuid::new_v4());
@@ -329,6 +355,7 @@ async fn redis_rpm_different_models_are_independent() {
             let node = UpstreamNode {
                 profile: UpstreamProfile {
                     base_url: upstream_url.clone(),
+                    provider_node_id: String::new(),
                     api_compatibility: ApiCompatibility::OpenAi,
                     runtime_type: RuntimeType::External,
                     upstream_model_name: None,
@@ -382,7 +409,9 @@ async fn redis_rpm_different_models_are_independent() {
 /// the third pre-flight check sees 24 ≥ 20 → 429.
 #[tokio::test]
 async fn redis_tpm_third_request_returns_429_after_two_token_records() {
-    let Some(rl) = try_redis_limiter(60).await else { return };
+    let Some(rl) = try_redis_limiter(60).await else {
+        return;
+    };
 
     let model = format!("tpm-test-{}", Uuid::new_v4());
     let upstream_url = spawn_mock_upstream(200, "application/json", NON_STREAM_BODY).await;
@@ -393,16 +422,26 @@ async fn redis_tpm_third_request_returns_429_after_two_token_records() {
     assert_eq!(r1.status(), StatusCode::OK, "1st request should succeed");
 
     let r2 = chat_post(app.clone(), &model).await;
-    assert_eq!(r2.status(), StatusCode::OK, "2nd request should succeed (10 < 20 pre-flight)");
+    assert_eq!(
+        r2.status(),
+        StatusCode::OK,
+        "2nd request should succeed (10 < 20 pre-flight)"
+    );
 
     let r3 = chat_post(app.clone(), &model).await;
-    assert_eq!(r3.status(), StatusCode::TOO_MANY_REQUESTS, "3rd request should be TPM-limited");
+    assert_eq!(
+        r3.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "3rd request should be TPM-limited"
+    );
 }
 
 /// TPM 429 must identify the violated dimension.
 #[tokio::test]
 async fn redis_tpm_429_body_identifies_key_tpm() {
-    let Some(rl) = try_redis_limiter(60).await else { return };
+    let Some(rl) = try_redis_limiter(60).await else {
+        return;
+    };
 
     let model = format!("tpm-body-{}", Uuid::new_v4());
     let upstream_url = spawn_mock_upstream(200, "application/json", NON_STREAM_BODY).await;
@@ -413,7 +452,10 @@ async fn redis_tpm_429_body_identifies_key_tpm() {
 
     let denied = chat_post(app.clone(), &model).await;
     let text = body_text(denied).await;
-    assert!(text.contains("key_tpm"), "body should identify dimension (key_tpm): {text}");
+    assert!(
+        text.contains("key_tpm"),
+        "body should identify dimension (key_tpm): {text}"
+    );
 }
 
 // ── Primary-tier capacity spillover ──────────────────────────────────────────
@@ -431,7 +473,9 @@ const FALLBACK_BODY: &str = r#"{"id":"f","object":"chat.completion","choices":[{
 /// - Request 2 → fallback tier (primary at capacity; no 429, client gets 200)
 #[tokio::test]
 async fn redis_primary_capacity_rpm_spillover_routes_to_fallback() {
-    let Some(rl) = try_redis_limiter(60).await else { return };
+    let Some(rl) = try_redis_limiter(60).await else {
+        return;
+    };
 
     let model = format!("spillover-rpm-{}", Uuid::new_v4());
     let primary_url = spawn_mock_upstream(200, "application/json", PRIMARY_BODY).await;
@@ -443,16 +487,30 @@ async fn redis_primary_capacity_rpm_spillover_routes_to_fallback() {
     let r1 = chat_post(app.clone(), &model).await;
     let status1 = r1.status();
     let body1 = body_text(r1).await;
-    assert_eq!(status1, StatusCode::OK, "r1 unexpected status; body: {body1}");
-    assert!(body1.contains("from-primary"), "r1 should come from primary: {body1}");
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "r1 unexpected status; body: {body1}"
+    );
+    assert!(
+        body1.contains("from-primary"),
+        "r1 should come from primary: {body1}"
+    );
 
     // Second request: primary capacity 1 → 2 (> 1) → spillover to fallback.
     // Critically: still 200, not 429.
     let r2 = chat_post(app.clone(), &model).await;
     let status2 = r2.status();
     let body2 = body_text(r2).await;
-    assert_eq!(status2, StatusCode::OK, "r2 must be 200 (spillover, not client error); body: {body2}");
-    assert!(body2.contains("from-fallback"), "r2 should come from fallback: {body2}");
+    assert_eq!(
+        status2,
+        StatusCode::OK,
+        "r2 must be 200 (spillover, not client error); body: {body2}"
+    );
+    assert!(
+        body2.contains("from-fallback"),
+        "r2 should come from fallback: {body2}"
+    );
 }
 
 /// `primary_capacity_rpm` and `key_rpm` are orthogonal:
@@ -464,7 +522,9 @@ async fn redis_primary_capacity_rpm_spillover_routes_to_fallback() {
 /// - Requests 2–3 go to the fallback (primary capacity exhausted after request 1)
 #[tokio::test]
 async fn redis_spillover_and_key_rpm_are_orthogonal() {
-    let Some(rl) = try_redis_limiter(60).await else { return };
+    let Some(rl) = try_redis_limiter(60).await else {
+        return;
+    };
 
     let model = format!("spillover-orth-{}", Uuid::new_v4());
     let primary_url = spawn_mock_upstream(200, "application/json", PRIMARY_BODY).await;
@@ -484,24 +544,34 @@ async fn redis_spillover_and_key_rpm_are_orthogonal() {
         let node = UpstreamNode {
             profile: UpstreamProfile {
                 base_url: url.to_string(),
+                provider_node_id: String::new(),
                 api_compatibility: ApiCompatibility::OpenAi,
                 runtime_type: RuntimeType::External,
                 upstream_model_name: None,
                 credential: Arc::new(UpstreamCredential {
-                    name: format!("mock-{}", priority),
+                    name: format!("mock-{priority}"),
                     api_key: None,
                     provider_type: ProviderType::Unknown,
                 }),
             },
             healthy: Arc::new(AtomicBool::new(true)),
         };
-        UpstreamBinding::new(node, true, RoutingStrategyConfig::Swrr { weight: 1 }, priority).unwrap()
+        UpstreamBinding::new(
+            node,
+            true,
+            RoutingStrategyConfig::Swrr { weight: 1 },
+            priority,
+        )
+        .unwrap()
     };
 
     let group = UpstreamGroup::new(
         ModelCard::new(&model),
         RoutingStrategy::Swrr,
-        vec![make_binding(&primary_url, 0), make_binding(&fallback_url, 1)],
+        vec![
+            make_binding(&primary_url, 0),
+            make_binding(&fallback_url, 1),
+        ],
     )
     .unwrap()
     .with_rate_limits(Some(3), None, None, None)
@@ -522,19 +592,36 @@ async fn redis_spillover_and_key_rpm_are_orthogonal() {
     // r1 → primary (capacity 0→1, key_rpm 0→1)
     let r1 = chat_post(app.clone(), &model).await;
     assert_eq!(r1.status(), StatusCode::OK);
-    assert!(body_text(r1).await.contains("from-primary"), "r1 should be primary");
+    assert!(
+        body_text(r1).await.contains("from-primary"),
+        "r1 should be primary"
+    );
 
     // r2 → fallback (capacity exhausted; key_rpm 1→2, still within 3)
     let r2 = chat_post(app.clone(), &model).await;
-    assert_eq!(r2.status(), StatusCode::OK, "r2 must be 200 not 429 — spillover not rejection");
-    assert!(body_text(r2).await.contains("from-fallback"), "r2 should be fallback");
+    assert_eq!(
+        r2.status(),
+        StatusCode::OK,
+        "r2 must be 200 not 429 — spillover not rejection"
+    );
+    assert!(
+        body_text(r2).await.contains("from-fallback"),
+        "r2 should be fallback"
+    );
 
     // r3 → fallback (capacity still exhausted; key_rpm 2→3, within limit)
     let r3 = chat_post(app.clone(), &model).await;
     assert_eq!(r3.status(), StatusCode::OK, "r3 must be 200");
-    assert!(body_text(r3).await.contains("from-fallback"), "r3 should be fallback");
+    assert!(
+        body_text(r3).await.contains("from-fallback"),
+        "r3 should be fallback"
+    );
 
     // r4 → 429 (key_rpm 3→4, exceeds limit=3)
     let r4 = chat_post(app.clone(), &model).await;
-    assert_eq!(r4.status(), StatusCode::TOO_MANY_REQUESTS, "r4 should be rejected by key_rpm");
+    assert_eq!(
+        r4.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "r4 should be rejected by key_rpm"
+    );
 }

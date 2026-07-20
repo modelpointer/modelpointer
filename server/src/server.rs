@@ -1,50 +1,54 @@
+use axum::http::HeaderValue;
+use axum::{
+    Router,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use rustls::crypto::ring;
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
-use axum::{
-    Router, extract::{Path, Query, State}, response::{IntoResponse, Response}, routing::{get, post}, http::{HeaderMap, StatusCode},
-};
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
-use axum::http::HeaderValue;
-use rustls::crypto::ring;
 use tokio::{signal, spawn};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
+use crate::auth::{CachedApiKeyRepository, SqlApiKeyRepository};
+use crate::auth_config::AuthConfigSource;
+use crate::db::{
+    ConfigResource, Database, load_all_quota_overrides, load_all_upstream_groups,
+    load_config_version,
+};
+use crate::file_config::FileConfigSource;
+use crate::quota_config::{QuotaConfigSource, QuotaStore};
+use crate::rate_limit_memory::MemoryRateLimiter;
+use crate::rate_limit_redis::RedisRateLimiter;
+use crate::{
+    log_sink::{self, AccessLogRecord, LogSink, LogWriter},
+    middleware::{self, ApiKeyIdentity, RequestId},
+    router::{GatewayRouter, RequestContext, RouterTrait},
+};
+use chrono::Utc;
+use modelpointer_core::observability::metrics::metrics_labels::{
+    ENDPOINT_CHAT, ENDPOINT_EMBEDDINGS, ENDPOINT_MESSAGES, ENDPOINT_RESPONSES,
+};
+use modelpointer_core::openai_protocol::{
+    chat::ChatCompletionRequest, embedding::EmbeddingRequest, messages::CreateMessageRequest,
+    validated::ValidatedJson,
+};
 use modelpointer_core::{
     app_context::AppContext,
     config::{AuthMode, ServerConfig},
     observability::{
         logging::{self, LoggingConfig},
-        metrics,
-        otel_trace,
+        metrics, otel_trace,
     },
     rate_limit::{RateLimitCtx, RateLimitDecision, RateLimitKey, RateLimiter},
     storage::ApiKeyRepository,
-};
-use crate::db::{Database, load_all_quota_overrides, load_all_upstream_groups};
-use crate::auth::{CachedApiKeyRepository, SqlApiKeyRepository};
-use crate::file_config::FileConfigSource;
-use crate::auth_config::AuthConfigSource;
-use crate::rate_limit_memory::MemoryRateLimiter;
-use crate::quota_config::{QuotaConfigSource, QuotaStore};
-use crate::rate_limit_redis::RedisRateLimiter;
-use chrono::Utc;
-use crate::{
-    router::{GatewayRouter, RequestContext, RouterTrait},
-    middleware::{self, ApiKeyIdentity, RequestId},
-    log_sink::{self, LogSink, LogWriter, AccessLogRecord},
-};
-use modelpointer_core::observability::metrics::metrics_labels::{
-    ENDPOINT_CHAT, ENDPOINT_EMBEDDINGS, ENDPOINT_MESSAGES, ENDPOINT_RESPONSES,
-};
-use modelpointer_core::openai_protocol::{
-    chat::ChatCompletionRequest,
-    messages::CreateMessageRequest,
-    embedding::EmbeddingRequest,
-    validated::ValidatedJson,
 };
 use serde_json::json;
 use tracing::{Level, info, warn};
@@ -66,23 +70,23 @@ pub struct GatewayState {
 
 fn emit_rl_log(sink: &LogSink, req_id: &str, api_key_id: &str, model: &str, endpoint: &str) {
     sink.try_send(AccessLogRecord {
-        ts:                Utc::now(),
-        request_id:        req_id.to_owned(),
-        api_key_id:        api_key_id.to_owned(),
-        model:             model.to_owned(),
-        endpoint:          endpoint.to_owned(),
-        provider_url:      String::new(),
-        provider_node_id:  String::new(),
-        upstream_model:    String::new(),
-        status_code:       429,
-        latency_ms:        0,
-        streaming:         false,
-        ttft_ms:           0,
-        tpot_ms:           0.0,
-        prompt_tokens:     0,
+        ts: Utc::now(),
+        request_id: req_id.to_owned(),
+        api_key_id: api_key_id.to_owned(),
+        model: model.to_owned(),
+        endpoint: endpoint.to_owned(),
+        provider_url: String::new(),
+        provider_node_id: String::new(),
+        upstream_model: String::new(),
+        status_code: 429,
+        latency_ms: 0,
+        streaming: false,
+        ttft_ms: 0,
+        tpot_ms: 0.0,
+        prompt_tokens: 0,
         completion_tokens: 0,
-        total_tokens:      0,
-        finish_reason:     String::new(),
+        total_tokens: 0,
+        finish_reason: String::new(),
     });
 }
 
@@ -106,21 +110,29 @@ async fn check_rate_limits(
     };
     let (default_key_rpm, default_key_tpm, model_rpm, model_tpm) =
         state.context.upstream_registry.get_rate_limits(model_id);
-    let (primary_cap_rpm, primary_cap_tpm) =
-        state.context.upstream_registry.get_primary_capacity(model_id, protocol);
+    let (primary_cap_rpm, primary_cap_tpm) = state
+        .context
+        .upstream_registry
+        .get_primary_capacity(model_id, protocol);
 
     // Per-(api_key, model) quota override: takes precedence over model defaults.
     let quota = state.quota_store.get(api_key_id, model_id);
     let key_rpm = quota.as_ref().and_then(|q| q.key_rpm).or(default_key_rpm);
     let key_tpm = quota.as_ref().and_then(|q| q.key_tpm).or(default_key_tpm);
 
-    if key_rpm.is_none() && key_tpm.is_none() && model_rpm.is_none() && model_tpm.is_none()
-        && primary_cap_rpm.is_none() && primary_cap_tpm.is_none()
+    if key_rpm.is_none()
+        && key_tpm.is_none()
+        && model_rpm.is_none()
+        && model_tpm.is_none()
+        && primary_cap_rpm.is_none()
+        && primary_cap_tpm.is_none()
     {
         return Ok((None, 0));
     }
 
-    let model_key = RateLimitKey::Model { model_id: model_id.to_string() };
+    let model_key = RateLimitKey::Model {
+        model_id: model_id.to_string(),
+    };
     let key_model_key = RateLimitKey::KeyModel {
         api_key_id: api_key_id.to_string(),
         model_id: model_id.to_string(),
@@ -215,14 +227,17 @@ async fn check_rate_limits(
     let record_primary_tpm = primary_cap_tpm.is_some() && min_priority == 0;
 
     if record_key_tpm || record_model_tpm || record_primary_tpm {
-        Ok((Some(RateLimitCtx {
-            limiter: Arc::clone(rl),
-            model_id: model_id.to_string(),
-            protocol: protocol.to_string(),
-            record_key_tpm,
-            record_model_tpm,
-            record_primary_tpm,
-        }), min_priority))
+        Ok((
+            Some(RateLimitCtx {
+                limiter: Arc::clone(rl),
+                model_id: model_id.to_string(),
+                protocol: protocol.to_string(),
+                record_key_tpm,
+                record_model_tpm,
+                record_primary_tpm,
+            }),
+            min_priority,
+        ))
     } else {
         Ok((None, min_priority))
     }
@@ -275,14 +290,26 @@ async fn v1_chat_completions(
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {
     info!("Received chat completion request for model: {}", body.model);
-    let (rate_limit, min_priority) = match check_rate_limits(&state, &identity.key_id, &body.model, "openai").await {
-        Ok(result) => result,
-        Err(resp) => {
-            emit_rl_log(&state.log_sink, &request_id.0, &identity.key_id, &body.model, ENDPOINT_CHAT);
-            return resp;
-        }
+    let (rate_limit, min_priority) =
+        match check_rate_limits(&state, &identity.key_id, &body.model, "openai").await {
+            Ok(result) => result,
+            Err(resp) => {
+                emit_rl_log(
+                    &state.log_sink,
+                    &request_id.0,
+                    &identity.key_id,
+                    &body.model,
+                    ENDPOINT_CHAT,
+                );
+                return resp;
+            }
+        };
+    let ctx = RequestContext {
+        request_id: request_id.0,
+        api_key_id: identity.key_id,
+        rate_limit,
+        min_priority,
     };
-    let ctx = RequestContext { request_id: request_id.0, api_key_id: identity.key_id, rate_limit, min_priority };
     state
         .router
         .route_chat(&body, Some(&body.model), &headers, &ctx)
@@ -296,14 +323,26 @@ async fn v1_messages(
     axum::extract::Extension(identity): axum::extract::Extension<ApiKeyIdentity>,
     ValidatedJson(body): ValidatedJson<CreateMessageRequest>,
 ) -> Response {
-    let (rate_limit, min_priority) = match check_rate_limits(&state, &identity.key_id, &body.model, "anthropic").await {
-        Ok(result) => result,
-        Err(resp) => {
-            emit_rl_log(&state.log_sink, &request_id.0, &identity.key_id, &body.model, ENDPOINT_MESSAGES);
-            return resp;
-        }
+    let (rate_limit, min_priority) =
+        match check_rate_limits(&state, &identity.key_id, &body.model, "anthropic").await {
+            Ok(result) => result,
+            Err(resp) => {
+                emit_rl_log(
+                    &state.log_sink,
+                    &request_id.0,
+                    &identity.key_id,
+                    &body.model,
+                    ENDPOINT_MESSAGES,
+                );
+                return resp;
+            }
+        };
+    let ctx = RequestContext {
+        request_id: request_id.0,
+        api_key_id: identity.key_id,
+        rate_limit,
+        min_priority,
     };
-    let ctx = RequestContext { request_id: request_id.0, api_key_id: identity.key_id, rate_limit, min_priority };
     state
         .router
         .route_messages(&body, Some(&body.model), &headers, &ctx)
@@ -318,14 +357,26 @@ async fn v1_embeddings(
     axum::Json(body): axum::Json<EmbeddingRequest>,
 ) -> Response {
     info!("Received embedding request for model: {}", body.model);
-    let (rate_limit, min_priority) = match check_rate_limits(&state, &identity.key_id, &body.model, "openai").await {
-        Ok(result) => result,
-        Err(resp) => {
-            emit_rl_log(&state.log_sink, &request_id.0, &identity.key_id, &body.model, ENDPOINT_EMBEDDINGS);
-            return resp;
-        }
+    let (rate_limit, min_priority) =
+        match check_rate_limits(&state, &identity.key_id, &body.model, "openai").await {
+            Ok(result) => result,
+            Err(resp) => {
+                emit_rl_log(
+                    &state.log_sink,
+                    &request_id.0,
+                    &identity.key_id,
+                    &body.model,
+                    ENDPOINT_EMBEDDINGS,
+                );
+                return resp;
+            }
+        };
+    let ctx = RequestContext {
+        request_id: request_id.0,
+        api_key_id: identity.key_id,
+        rate_limit,
+        min_priority,
     };
-    let ctx = RequestContext { request_id: request_id.0, api_key_id: identity.key_id, rate_limit, min_priority };
     state
         .router
         .route_embedding(&body, Some(&body.model), &headers, &ctx)
@@ -340,14 +391,26 @@ async fn v1_responses(
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> Response {
     let model_id = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
-    let (rate_limit, min_priority) = match check_rate_limits(&state, &identity.key_id, model_id, "openai").await {
-        Ok(result) => result,
-        Err(resp) => {
-            emit_rl_log(&state.log_sink, &request_id.0, &identity.key_id, model_id, ENDPOINT_RESPONSES);
-            return resp;
-        }
+    let (rate_limit, min_priority) =
+        match check_rate_limits(&state, &identity.key_id, model_id, "openai").await {
+            Ok(result) => result,
+            Err(resp) => {
+                emit_rl_log(
+                    &state.log_sink,
+                    &request_id.0,
+                    &identity.key_id,
+                    model_id,
+                    ENDPOINT_RESPONSES,
+                );
+                return resp;
+            }
+        };
+    let ctx = RequestContext {
+        request_id: request_id.0,
+        api_key_id: identity.key_id,
+        rate_limit,
+        min_priority,
     };
-    let ctx = RequestContext { request_id: request_id.0, api_key_id: identity.key_id, rate_limit, min_priority };
     state.router.route_responses(body, &headers, &ctx).await
 }
 
@@ -358,7 +421,12 @@ async fn v1_responses_retrieve(
     axum::extract::Extension(identity): axum::extract::Extension<ApiKeyIdentity>,
     Path(response_id): Path<String>,
 ) -> Response {
-    let ctx = RequestContext { request_id: request_id.0, api_key_id: identity.key_id, rate_limit: None, min_priority: 0 };
+    let ctx = RequestContext {
+        request_id: request_id.0,
+        api_key_id: identity.key_id,
+        rate_limit: None,
+        min_priority: 0,
+    };
     state
         .router
         .route_response_retrieve(&response_id, &headers, &ctx)
@@ -372,7 +440,12 @@ async fn v1_responses_delete(
     axum::extract::Extension(identity): axum::extract::Extension<ApiKeyIdentity>,
     Path(response_id): Path<String>,
 ) -> Response {
-    let ctx = RequestContext { request_id: request_id.0, api_key_id: identity.key_id, rate_limit: None, min_priority: 0 };
+    let ctx = RequestContext {
+        request_id: request_id.0,
+        api_key_id: identity.key_id,
+        rate_limit: None,
+        min_priority: 0,
+    };
     state
         .router
         .route_response_delete(&response_id, &headers, &ctx)
@@ -390,10 +463,15 @@ async fn v1_responses_input_items(
     // Forward all query params verbatim to the upstream (limit, after, order, include, …).
     let upstream_qs: String = params
         .iter()
-        .map(|(k, v)| format!("{}={}", k, v))
+        .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join("&");
-    let ctx = RequestContext { request_id: request_id.0, api_key_id: identity.key_id, rate_limit: None, min_priority: 0 };
+    let ctx = RequestContext {
+        request_id: request_id.0,
+        api_key_id: identity.key_id,
+        rate_limit: None,
+        min_priority: 0,
+    };
     state
         .router
         .route_response_input_items(&response_id, &upstream_qs, &headers, &ctx)
@@ -406,10 +484,7 @@ fn cors_layer(origins: &[String]) -> Result<CorsLayer, String> {
     }
     let list: Vec<HeaderValue> = origins
         .iter()
-        .map(|s| {
-            s.parse()
-                .map_err(|_| format!("invalid CORS origin: {s:?}"))
-        })
+        .map(|s| s.parse().map_err(|_| format!("invalid CORS origin: {s:?}")))
         .collect::<Result<_, _>>()?;
     Ok(CorsLayer::new()
         .allow_headers(Any)
@@ -429,8 +504,14 @@ pub fn build_app(
         .route("/v1/messages", post(v1_messages))
         .route("/v1/embeddings", post(v1_embeddings))
         .route("/v1/responses", post(v1_responses))
-        .route("/v1/responses/{response_id}", get(v1_responses_retrieve).delete(v1_responses_delete))
-        .route("/v1/responses/{response_id}/input_items", get(v1_responses_input_items))
+        .route(
+            "/v1/responses/{response_id}",
+            get(v1_responses_retrieve).delete(v1_responses_delete),
+        )
+        .route(
+            "/v1/responses/{response_id}/input_items",
+            get(v1_responses_input_items),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::auth_middleware,
@@ -495,12 +576,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         metrics::start_prometheus(prometheus_config.clone());
     }
 
-    let app_context = Arc::new(
-        AppContext::with_config(
-            config.router_config.clone(),
-        )
-        .await?,
-    );
+    let app_context = Arc::new(AppContext::with_config(config.router_config.clone()).await?);
 
     // ── Routes: file or database ──────────────────────────────────────────────
     let database: Option<Database> = if config.route_file.is_some() {
@@ -509,7 +585,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         info!("Loading route config from file: {}", config_path);
         let output = FileConfigSource::new(config_path)
             .load()
-            .map_err(|e| format!("Failed to load config file: {}", e))?;
+            .map_err(|e| format!("Failed to load config file: {e}"))?;
         app_context.upstream_registry.reload_all(output.groups);
         info!("UpstreamRegistry loaded from config file");
 
@@ -544,42 +620,82 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         // Database mode: connect and keep registry in sync with polling.
         let db = Database::connect(&config.database)
             .await
-            .map_err(|e| format!("Failed to connect to database: {}", e))?;
+            .map_err(|e| format!("Failed to connect to database: {e}"))?;
 
         match load_all_upstream_groups(db.pool(), db.dialect()).await {
             Ok(groups) if groups.is_empty() => {
-                tracing::warn!("No upstream groups found in database; all model requests will return 503 until routes are configured via the Admin API");
+                tracing::warn!(
+                    "No upstream groups found in database; all model requests will return 503 until routes are configured via the Admin API"
+                );
             }
             Ok(groups) => {
                 let count = groups.len();
                 app_context.upstream_registry.reload_all(groups);
                 info!("UpstreamRegistry loaded from database ({} groups)", count);
             }
-            Err(e) => return Err(format!("Failed to load upstream groups from database: {}", e).into()),
+            Err(e) => {
+                return Err(format!("Failed to load upstream groups from database: {e}").into());
+            }
         }
 
         {
             let registry = app_context.upstream_registry.clone();
             let poll_db = db.clone();
             let sync_interval = config.upstream_sync_interval_secs;
+            let force_reload = config.force_reload_interval_secs;
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(sync_interval));
                 interval.tick().await;
+                // Start at None so the first tick always reloads once, closing the
+                // window between the startup load and the first version read.
+                let mut last_version: Option<i64> = None;
+                let mut last_full = Instant::now();
                 loop {
                     interval.tick().await;
+                    let current = load_config_version(
+                        poll_db.pool(),
+                        poll_db.dialect(),
+                        ConfigResource::Routes,
+                    )
+                    .await;
+                    let forced = force_reload > 0 && last_full.elapsed().as_secs() >= force_reload;
+                    // A real config change (version differs from what we last loaded)
+                    // is worth an INFO line; a periodic forced reload without a version
+                    // change is not.
+                    let changed = current != last_version;
+                    // Skip the heavy reload when the version is unchanged (and no
+                    // forced reload is due). A missing version row (None) always
+                    // reloads, as a safe fallback.
+                    if !forced && current.is_some() && current == last_version {
+                        continue;
+                    }
                     match load_all_upstream_groups(poll_db.pool(), poll_db.dialect()).await {
                         Ok(groups) if groups.is_empty() => {
                             // DB returned 0 routes — honour the admin's intent and clear
                             // the registry. Network/DB errors surface as Err, not Ok([]),
                             // so this is a genuine "no routes" signal from the database.
                             registry.reload_all(groups);
-                            tracing::warn!("DB poll returned 0 upstream groups — registry cleared, all model requests will return 503");
+                            last_version = current;
+                            last_full = Instant::now();
+                            tracing::warn!(
+                                "DB poll returned 0 upstream groups — registry cleared, all model requests will return 503"
+                            );
                         }
                         Ok(groups) => {
                             let count = groups.len();
                             registry.reload_all(groups);
-                            tracing::debug!("UpstreamRegistry reloaded from database ({} groups)", count);
+                            last_version = current;
+                            last_full = Instant::now();
+                            if changed {
+                                info!("UpstreamRegistry reloaded from database ({} groups)", count);
+                            } else {
+                                tracing::debug!(
+                                    "UpstreamRegistry force-reloaded from database ({} groups)",
+                                    count
+                                );
+                            }
                         }
+                        // Leave last_version/last_full unchanged so the next tick retries.
                         Err(e) => tracing::warn!("UpstreamRegistry reload failed: {}", e),
                     }
                 }
@@ -590,140 +706,177 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     };
 
     // ── Auth: explicit no-auth, file, or database ────────────────────────────
-    let (api_key_repo, auth_required): (Arc<dyn ApiKeyRepository>, bool) =
-        if config.no_auth {
-            // Explicit opt-out: accept all requests without a key.
-            warn!("--no-auth is set: API key authentication is disabled, all requests accepted");
-            let cached = CachedApiKeyRepository::new();
-            (cached.into_shared(), false)
-        } else if let Some(auth_path) = &config.auth_file {
-            // Auth from file: load keys and watch for changes.
-            info!("Loading auth config from file: {}", auth_path);
-            let auth_output = AuthConfigSource::new(auth_path)
-                .load()
-                .map_err(|e| format!("Failed to load auth file: {}", e))?;
+    let (api_key_repo, auth_required): (Arc<dyn ApiKeyRepository>, bool) = if config.no_auth {
+        // Explicit opt-out: accept all requests without a key.
+        warn!("--no-auth is set: API key authentication is disabled, all requests accepted");
+        let cached = CachedApiKeyRepository::new();
+        (cached.into_shared(), false)
+    } else if let Some(auth_path) = &config.auth_file {
+        // Auth from file: load keys and watch for changes.
+        info!("Loading auth config from file: {}", auth_path);
+        let auth_output = AuthConfigSource::new(auth_path)
+            .load()
+            .map_err(|e| format!("Failed to load auth file: {e}"))?;
 
-            let cached = CachedApiKeyRepository::new();
-            cached.reload(auth_output.auth_keys);
-            info!("API key auth loaded from file");
+        let cached = CachedApiKeyRepository::new();
+        cached.reload(auth_output.auth_keys);
+        info!("API key auth loaded from file");
 
-            let cached_clone = cached.clone();
-            let path = auth_path.clone();
-            let interval = config.upstream_sync_interval_secs;
-            tokio::spawn(async move {
-                let mut last_mod = file_modified_time(&path);
-                let mut tick = tokio::time::interval(Duration::from_secs(interval));
+        let cached_clone = cached.clone();
+        let path = auth_path.clone();
+        let interval = config.upstream_sync_interval_secs;
+        tokio::spawn(async move {
+            let mut last_mod = file_modified_time(&path);
+            let mut tick = tokio::time::interval(Duration::from_secs(interval));
+            tick.tick().await;
+            loop {
                 tick.tick().await;
-                loop {
-                    tick.tick().await;
-                    let current_mod = file_modified_time(&path);
-                    if current_mod != last_mod {
-                        last_mod = current_mod;
-                        match AuthConfigSource::new(&path).load() {
-                            Ok(out) => {
-                                cached_clone.reload(out.auth_keys);
-                                info!("Auth config reloaded from file");
-                            }
-                            Err(e) => tracing::warn!("Auth config reload failed: {}", e),
+                let current_mod = file_modified_time(&path);
+                if current_mod != last_mod {
+                    last_mod = current_mod;
+                    match AuthConfigSource::new(&path).load() {
+                        Ok(out) => {
+                            cached_clone.reload(out.auth_keys);
+                            info!("Auth config reloaded from file");
                         }
+                        Err(e) => tracing::warn!("Auth config reload failed: {}", e),
                     }
-                }
-            });
-
-            (cached.into_shared(), true)
-        } else if config.route_file.is_some() {
-            // File route config without --auth-file and without --no-auth: refuse to start.
-            return Err(
-                "File config mode requires either --auth-file <path> or --no-auth. \
-                Pass --no-auth to run without API key authentication."
-                    .into(),
-            );
-        } else {
-            // Database mode: auth from DB (realtime or cached).
-            let db = database.as_ref().expect("database must be connected in DB mode");
-            let sql_key_repo = SqlApiKeyRepository::new(db.pool().clone(), db.dialect());
-
-            let repo: Arc<dyn ApiKeyRepository> = match config.auth_mode {
-                AuthMode::Realtime => {
-                    info!("API key auth mode: realtime (per-request DB lookup)");
-                    match sql_key_repo.find_all_active().await {
-                        Ok(entries) if entries.is_empty() => {
-                            warn!(
-                                "No active API keys found in the database — \
-                                all requests will be rejected with 401. \
-                                Create an API key via the Admin panel first."
-                            );
-                        }
-                        Err(e) => tracing::warn!("Initial API key check failed: {}", e),
-                        _ => {}
-                    }
-                    sql_key_repo.into_shared()
-                }
-                AuthMode::Cached => {
-                    info!(
-                        "API key auth mode: cached (reload every {}s)",
-                        config.auth_cache_ttl_secs
-                    );
-                    let cached = CachedApiKeyRepository::new();
-
-                    match sql_key_repo.find_all_active().await {
-                        Ok(entries) => {
-                            if entries.is_empty() {
-                                warn!(
-                                    "No active API keys found in the database — \
-                                    all requests will be rejected with 401. \
-                                    Create an API key via the Admin panel first."
-                                );
-                            }
-                            cached.reload(entries);
-                            info!("API key cache loaded");
-                        }
-                        Err(e) => tracing::warn!("Initial API key cache load failed: {}", e),
-                    }
-
-                    {
-                        let cached_clone = cached.clone();
-                        let reload_repo = SqlApiKeyRepository::new(db.pool().clone(), db.dialect());
-                        let ttl = config.auth_cache_ttl_secs;
-                        tokio::spawn(async move {
-                            let mut interval = tokio::time::interval(Duration::from_secs(ttl));
-                            interval.tick().await;
-                            loop {
-                                interval.tick().await;
-                                match reload_repo.find_all_active().await {
-                                    Ok(entries) => {
-                                        cached_clone.reload(entries);
-                                        tracing::debug!("API key cache reloaded");
-                                    }
-                                    Err(e) => tracing::warn!("API key cache reload failed: {}", e),
-                                }
-                            }
-                        });
-                    }
-
-                    cached.into_shared()
-                }
-            };
-            (repo, true)
-        };
-
-    let (log_sink, log_writer) = match &database {
-        Some(db) => {
-            match log_sink::start(db.pool().clone(), db.dialect()).await {
-                Ok((sink, writer)) => {
-                    info!("Access log writer started (database)");
-                    (sink, writer)
-                }
-                Err(e) => {
-                    warn!("Failed to start access log writer: {e} — access logs will only go to stdout");
-                    (LogSink::noop(), LogWriter::noop())
                 }
             }
-        }
+        });
+
+        (cached.into_shared(), true)
+    } else if config.route_file.is_some() {
+        // File route config without --auth-file and without --no-auth: refuse to start.
+        return Err(
+            "File config mode requires either --auth-file <path> or --no-auth. \
+                Pass --no-auth to run without API key authentication."
+                .into(),
+        );
+    } else {
+        // Database mode: auth from DB (realtime or cached).
+        let db = database
+            .as_ref()
+            .expect("database must be connected in DB mode");
+        let sql_key_repo = SqlApiKeyRepository::new(db.pool().clone(), db.dialect());
+
+        let repo: Arc<dyn ApiKeyRepository> = match config.auth_mode {
+            AuthMode::Realtime => {
+                info!("API key auth mode: realtime (per-request DB lookup)");
+                match sql_key_repo.find_all_active().await {
+                    Ok(entries) if entries.is_empty() => {
+                        warn!(
+                            "No active API keys found in the database — \
+                                all requests will be rejected with 401. \
+                                Create an API key via the Admin panel first."
+                        );
+                    }
+                    Err(e) => tracing::warn!("Initial API key check failed: {}", e),
+                    _ => {}
+                }
+                sql_key_repo.into_shared()
+            }
+            AuthMode::Cached => {
+                info!(
+                    "API key auth mode: cached (version-checked every {}s)",
+                    config.upstream_sync_interval_secs
+                );
+                let cached = CachedApiKeyRepository::new();
+
+                match sql_key_repo.find_all_active().await {
+                    Ok(entries) => {
+                        if entries.is_empty() {
+                            warn!(
+                                "No active API keys found in the database — \
+                                    all requests will be rejected with 401. \
+                                    Create an API key via the Admin panel first."
+                            );
+                        }
+                        cached.reload(entries);
+                        info!("API key cache loaded");
+                    }
+                    Err(e) => tracing::warn!("Initial API key cache load failed: {}", e),
+                }
+
+                {
+                    let cached_clone = cached.clone();
+                    let reload_repo = SqlApiKeyRepository::new(db.pool().clone(), db.dialect());
+                    let version_pool = db.pool().clone();
+                    let version_dialect = db.dialect();
+                    let sync_interval = config.upstream_sync_interval_secs;
+                    let force_reload = config.force_reload_interval_secs;
+                    tokio::spawn(async move {
+                        // Version-gated: only reloads when an admin mutation
+                        // bumps the api_keys version. This is correct only while
+                        // the active-key set is purely mutation-driven — i.e.
+                        // `api_keys.expires_at` stays NULL. If key expiry is ever
+                        // introduced, natural expiry won't bump the version and an
+                        // expired key would linger until the forced reload; make
+                        // the cache expiry-aware then. See auth::find_all_active.
+                        let mut interval =
+                            tokio::time::interval(Duration::from_secs(sync_interval));
+                        interval.tick().await;
+                        let mut last_version: Option<i64> = None;
+                        let mut last_full = Instant::now();
+                        loop {
+                            interval.tick().await;
+                            let current = load_config_version(
+                                &version_pool,
+                                version_dialect,
+                                ConfigResource::ApiKeys,
+                            )
+                            .await;
+                            let forced =
+                                force_reload > 0 && last_full.elapsed().as_secs() >= force_reload;
+                            let changed = current != last_version;
+                            if !forced && current.is_some() && current == last_version {
+                                continue;
+                            }
+                            match reload_repo.find_all_active().await {
+                                Ok(entries) => {
+                                    let count = entries.len();
+                                    cached_clone.reload(entries);
+                                    last_version = current;
+                                    last_full = Instant::now();
+                                    if changed {
+                                        info!("API key cache reloaded ({} active keys)", count);
+                                    } else {
+                                        tracing::debug!(
+                                            "API key cache force-reloaded ({} active keys)",
+                                            count
+                                        );
+                                    }
+                                }
+                                Err(e) => tracing::warn!("API key cache reload failed: {}", e),
+                            }
+                        }
+                    });
+                }
+
+                cached.into_shared()
+            }
+        };
+        (repo, true)
+    };
+
+    let (log_sink, log_writer) = match &database {
+        Some(db) => match log_sink::start(db.pool().clone(), db.dialect()).await {
+            Ok((sink, writer)) => {
+                info!("Access log writer started (database)");
+                (sink, writer)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to start access log writer: {e} — access logs will only go to stdout"
+                );
+                (LogSink::noop(), LogWriter::noop())
+            }
+        },
         None => (LogSink::noop(), LogWriter::noop()),
     };
 
-    let router: Arc<dyn RouterTrait> = Arc::new(GatewayRouter::new(&app_context, log_sink.clone()).await?);
+    let router: Arc<dyn RouterTrait> =
+        Arc::new(GatewayRouter::new(&app_context, log_sink.clone()).await?);
 
     let rate_limiter: Option<Arc<dyn RateLimiter>> = if let Some(rl_cfg) = &config.rate_limit {
         if let Some(redis_url) = &rl_cfg.redis_url {
@@ -731,13 +884,16 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             // Connection failure at startup is fatal — do not silently fall back.
             let rl = RedisRateLimiter::new(redis_url, rl_cfg.window_secs)
                 .await
-                .map_err(|e| format!("Failed to connect to Redis ({}): {}", redis_url, e))?;
+                .map_err(|e| format!("Failed to connect to Redis ({redis_url}): {e}"))?;
             info!(%redis_url, window_secs = rl_cfg.window_secs, "Rate limiter initialized (Redis)");
             Some(rl)
         } else {
             // Memory backend: in-process, no external dependency.
             let rl = MemoryRateLimiter::new(rl_cfg.window_secs);
-            info!(window_secs = rl_cfg.window_secs, "Rate limiter initialized (memory)");
+            info!(
+                window_secs = rl_cfg.window_secs,
+                "Rate limiter initialized (memory)"
+            );
             Some(rl)
         }
     } else {
@@ -795,19 +951,39 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             let store = quota_store.clone();
             let poll_db = db.clone();
             let sync_interval = config.upstream_sync_interval_secs;
+            let force_reload = config.force_reload_interval_secs;
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(sync_interval));
                 interval.tick().await;
+                let mut last_version: Option<i64> = None;
+                let mut last_full = Instant::now();
                 loop {
                     interval.tick().await;
+                    let current = load_config_version(
+                        poll_db.pool(),
+                        poll_db.dialect(),
+                        ConfigResource::Quota,
+                    )
+                    .await;
+                    let forced = force_reload > 0 && last_full.elapsed().as_secs() >= force_reload;
+                    let changed = current != last_version;
+                    if !forced && current.is_some() && current == last_version {
+                        continue;
+                    }
                     match load_all_quota_overrides(poll_db.pool(), poll_db.dialect()).await {
                         Ok(entries) => {
                             let count = entries.len();
                             store.reload(entries);
-                            tracing::debug!(
-                                "Quota overrides reloaded from database ({} entries)",
-                                count
-                            );
+                            last_version = current;
+                            last_full = Instant::now();
+                            if changed {
+                                info!("Quota overrides reloaded from database ({} entries)", count);
+                            } else {
+                                tracing::debug!(
+                                    "Quota overrides force-reloaded from database ({} entries)",
+                                    count
+                                );
+                            }
                         }
                         Err(e) => tracing::warn!("Quota overrides reload failed: {}", e),
                     }
@@ -840,7 +1016,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let app = build_app(app_state, config.max_payload_size, request_id_headers, cors);
     let bind_addr = format!("{}:{}", config.host, config.port);
 
-    print!("\n");
+    println!();
 
     info!(
         "Starting gateway on {}:{} | max_payload: {}MB",
@@ -852,7 +1028,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     // Parse address and set up graceful shutdown (common to both TLS and non-TLS)
     let addr: std::net::SocketAddr = bind_addr
         .parse()
-        .map_err(|e| format!("Invalid address: {}", e))?;
+        .map_err(|e| format!("Invalid address: {e}"))?;
 
     let handle = axum_server::Handle::new();
     let handle_clone = handle.clone();
@@ -873,7 +1049,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
         let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(cert.clone(), key.clone())
             .await
-            .map_err(|e| format!("Failed to create TLS config: {}", e))?;
+            .map_err(|e| format!("Failed to create TLS config: {e}"))?;
 
         axum_server::bind_rustls(addr, tls_config)
             .handle(handle)

@@ -8,16 +8,16 @@
 //!   test assertions on status / Content-Type / body
 
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, OnceLock,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
     response::Response,
     routing::post,
-    Router,
 };
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -28,15 +28,15 @@ use modelpointer::{
     log_sink::LogSink,
     quota_config::QuotaStore,
     router::GatewayRouter,
-    server::{build_app, GatewayState},
+    server::{GatewayState, build_app},
 };
 use modelpointer_core::{
     app_context::AppContext,
     config::RouterConfig,
     model::ModelCard,
     upstream::node::{
-        ApiCompatibility, RuntimeType, UpstreamBinding, UpstreamCredential, UpstreamGroup,
-        UpstreamNode, UpstreamProfile, ProviderType,
+        ApiCompatibility, ProviderType, RuntimeType, UpstreamBinding, UpstreamCredential,
+        UpstreamGroup, UpstreamNode, UpstreamProfile,
     },
     upstream::routing::{RoutingStrategy, RoutingStrategyConfig},
 };
@@ -60,7 +60,11 @@ fn bypass_proxy() {
 ///
 /// The server handles **any POST path** and always responds with the given
 /// `status`, `content_type`, and `body`.
-async fn spawn_mock_upstream(status: u16, content_type: &'static str, body: &'static str) -> String {
+async fn spawn_mock_upstream(
+    status: u16,
+    content_type: &'static str,
+    body: &'static str,
+) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -85,6 +89,7 @@ async fn spawn_mock_upstream(status: u16, content_type: &'static str, body: &'st
 /// Like [`spawn_mock_upstream`] but also returns an `Arc<AtomicUsize>` that is
 /// incremented on every request received by the mock.  Use this to assert that
 /// the gateway did (or did not) retry.
+#[allow(dead_code)]
 async fn spawn_mock_upstream_with_counter(
     status: u16,
     content_type: &'static str,
@@ -137,6 +142,7 @@ async fn make_gateway(upstream_base_url: &str) -> Router {
     let node = UpstreamNode {
         profile: UpstreamProfile {
             base_url: upstream_base_url.to_string(),
+            provider_node_id: String::new(),
             api_compatibility: ApiCompatibility::OpenAi,
             runtime_type: RuntimeType::External,
             upstream_model_name: None,
@@ -150,9 +156,12 @@ async fn make_gateway(upstream_base_url: &str) -> Router {
     };
     let binding =
         UpstreamBinding::new(node, true, RoutingStrategyConfig::Swrr { weight: 1 }, 0).unwrap();
-    let group =
-        UpstreamGroup::new(ModelCard::new("test-model"), RoutingStrategy::Swrr, vec![binding])
-            .unwrap();
+    let group = UpstreamGroup::new(
+        ModelCard::new("test-model"),
+        RoutingStrategy::Swrr,
+        vec![binding],
+    )
+    .unwrap();
     context.upstream_registry.reload_all(vec![group]);
 
     let state = Arc::new(GatewayState {
@@ -187,7 +196,7 @@ async fn post_json(app: Router, uri: &str, json: &'static str) -> axum::response
     app.oneshot(req).await.unwrap()
 }
 
-/// POST with an additional `x-tp-provider` header (required by /v1/responses).
+/// POST with an additional `x-mp-provider` header (required by /v1/responses).
 async fn post_json_with_provider(
     app: Router,
     uri: &str,
@@ -198,7 +207,7 @@ async fn post_json_with_provider(
         .method("POST")
         .uri(uri)
         .header("content-type", "application/json")
-        .header("x-tp-provider", provider)
+        .header("x-mp-provider", provider)
         .body(Body::from(json))
         .unwrap();
     app.oneshot(req).await.unwrap()
@@ -252,7 +261,10 @@ async fn chat_streaming_openai_format_forwarded() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let ct = resp.headers()["content-type"].to_str().unwrap();
-    assert!(ct.contains("text/event-stream"), "expected SSE content-type, got: {ct}");
+    assert!(
+        ct.contains("text/event-stream"),
+        "expected SSE content-type, got: {ct}"
+    );
 
     let text = body_text(resp).await;
     assert!(text.contains("Hello"), "missing first chunk: {text}");
@@ -274,7 +286,10 @@ async fn chat_streaming_finish_reason_in_body() {
 
     let text = body_text(resp).await;
     // The final data chunk must contain finish_reason=stop forwarded verbatim.
-    assert!(text.contains("\"finish_reason\":\"stop\""), "finish_reason not forwarded: {text}");
+    assert!(
+        text.contains("\"finish_reason\":\"stop\""),
+        "finish_reason not forwarded: {text}"
+    );
 }
 
 #[tokio::test]
@@ -291,8 +306,14 @@ async fn chat_streaming_usage_in_body() {
 
     let text = body_text(resp).await;
     // Usage block must pass through from the upstream.
-    assert!(text.contains("\"prompt_tokens\":10"), "usage not forwarded: {text}");
-    assert!(text.contains("\"total_tokens\":12"), "usage not forwarded: {text}");
+    assert!(
+        text.contains("\"prompt_tokens\":10"),
+        "usage not forwarded: {text}"
+    );
+    assert!(
+        text.contains("\"total_tokens\":12"),
+        "usage not forwarded: {text}"
+    );
 }
 
 // ── Chat completions: non-streaming ───────────────────────────────────────────
@@ -306,8 +327,7 @@ const OPENAI_CHAT_NON_STREAM: &str = r#"{
 
 #[tokio::test]
 async fn chat_non_streaming_response_forwarded() {
-    let base_url =
-        spawn_mock_upstream(200, "application/json", OPENAI_CHAT_NON_STREAM).await;
+    let base_url = spawn_mock_upstream(200, "application/json", OPENAI_CHAT_NON_STREAM).await;
     let app = make_gateway(&base_url).await;
 
     let resp = post_json(
@@ -319,8 +339,14 @@ async fn chat_non_streaming_response_forwarded() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let text = body_text(resp).await;
-    assert!(text.contains("\"content\":\"Hi!\""), "body not forwarded: {text}");
-    assert!(text.contains("\"finish_reason\":\"stop\""), "finish_reason not forwarded: {text}");
+    assert!(
+        text.contains("\"content\":\"Hi!\""),
+        "body not forwarded: {text}"
+    );
+    assert!(
+        text.contains("\"finish_reason\":\"stop\""),
+        "finish_reason not forwarded: {text}"
+    );
 }
 
 // ── Upstream error propagation ─────────────────────────────────────────────────
@@ -392,8 +418,7 @@ async fn responses_streaming_dashscope_no_space_format_forwarded() {
     // DashScope emits `event:type` and `data:{...}` (no space after colon).
     // The gateway must forward the chunks correctly regardless of whether the
     // internal SSE parser can extract usage (which it can, after the bug fix).
-    let base_url =
-        spawn_mock_upstream(200, "text/event-stream", DASHSCOPE_RESPONSES_SSE).await;
+    let base_url = spawn_mock_upstream(200, "text/event-stream", DASHSCOPE_RESPONSES_SSE).await;
     let app = make_gateway(&base_url).await;
 
     let resp = post_json_with_provider(
@@ -405,19 +430,29 @@ async fn responses_streaming_dashscope_no_space_format_forwarded() {
     .await;
 
     let status = resp.status();
-    let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let text = body_text(resp).await;
     assert_eq!(status, StatusCode::OK, "unexpected status; body: {text}");
-    assert!(ct.contains("text/event-stream"), "expected SSE content-type, got: {ct}");
+    assert!(
+        ct.contains("text/event-stream"),
+        "expected SSE content-type, got: {ct}"
+    );
     assert!(text.contains("Hello"), "missing first delta: {text}");
     assert!(text.contains("world"), "missing second delta: {text}");
-    assert!(text.contains("response.completed"), "missing completion event: {text}");
+    assert!(
+        text.contains("response.completed"),
+        "missing completion event: {text}"
+    );
 }
 
 #[tokio::test]
 async fn responses_streaming_openai_space_format_forwarded() {
-    let base_url =
-        spawn_mock_upstream(200, "text/event-stream", OPENAI_RESPONSES_SSE).await;
+    let base_url = spawn_mock_upstream(200, "text/event-stream", OPENAI_RESPONSES_SSE).await;
     let app = make_gateway(&base_url).await;
 
     let resp = post_json_with_provider(
@@ -432,7 +467,10 @@ async fn responses_streaming_openai_space_format_forwarded() {
     let text = body_text(resp).await;
     assert_eq!(status, StatusCode::OK, "unexpected status; body: {text}");
     assert!(text.contains("Hi there"), "content not forwarded: {text}");
-    assert!(text.contains("response.completed"), "missing completion event: {text}");
+    assert!(
+        text.contains("response.completed"),
+        "missing completion event: {text}"
+    );
 }
 
 // ── Fallback routing ──────────────────────────────────────────────────────────
@@ -454,14 +492,18 @@ async fn primary_unhealthy_routes_to_fallback() {
     let primary_healthy = Arc::new(AtomicBool::new(true));
 
     let context = Arc::new(
-        AppContext::with_config(RouterConfig { request_timeout_secs: 5, ..RouterConfig::default() })
-            .await
-            .unwrap(),
+        AppContext::with_config(RouterConfig {
+            request_timeout_secs: 5,
+            ..RouterConfig::default()
+        })
+        .await
+        .unwrap(),
     );
 
     let make_node = |url: &str, healthy: Arc<AtomicBool>| UpstreamNode {
         profile: UpstreamProfile {
             base_url: url.to_string(),
+            provider_node_id: String::new(),
             api_compatibility: ApiCompatibility::OpenAi,
             runtime_type: RuntimeType::External,
             upstream_model_name: None,
@@ -516,7 +558,10 @@ async fn primary_unhealthy_routes_to_fallback() {
     )
     .await;
     assert_eq!(r1.status(), StatusCode::OK);
-    assert!(body_text(r1).await.contains("from-primary"), "expected primary response");
+    assert!(
+        body_text(r1).await.contains("from-primary"),
+        "expected primary response"
+    );
 
     // Mark the primary as unhealthy — no gateway rebuild needed.
     primary_healthy.store(false, std::sync::atomic::Ordering::Release);
@@ -529,7 +574,10 @@ async fn primary_unhealthy_routes_to_fallback() {
     )
     .await;
     assert_eq!(r2.status(), StatusCode::OK);
-    assert!(body_text(r2).await.contains("from-fallback"), "expected fallback response");
+    assert!(
+        body_text(r2).await.contains("from-fallback"),
+        "expected fallback response"
+    );
 
     // Restore primary — routes back to primary.
     primary_healthy.store(true, std::sync::atomic::Ordering::Release);
@@ -540,7 +588,10 @@ async fn primary_unhealthy_routes_to_fallback() {
     )
     .await;
     assert_eq!(r3.status(), StatusCode::OK);
-    assert!(body_text(r3).await.contains("from-primary"), "expected primary after restore");
+    assert!(
+        body_text(r3).await.contains("from-primary"),
+        "expected primary after restore"
+    );
 }
 
 /// When the primary's circuit breaker is open (after repeated failures),
@@ -553,15 +604,19 @@ async fn primary_circuit_open_routes_to_fallback() {
 
     bypass_proxy();
     let context = Arc::new(
-        AppContext::with_config(RouterConfig { request_timeout_secs: 5, ..RouterConfig::default() })
-            .await
-            .unwrap(),
+        AppContext::with_config(RouterConfig {
+            request_timeout_secs: 5,
+            ..RouterConfig::default()
+        })
+        .await
+        .unwrap(),
     );
 
     let fallback_binding = UpstreamBinding::new(
         UpstreamNode {
             profile: UpstreamProfile {
                 base_url: fallback_url.clone(),
+                provider_node_id: String::new(),
                 api_compatibility: ApiCompatibility::OpenAi,
                 runtime_type: RuntimeType::External,
                 upstream_model_name: None,
@@ -590,9 +645,10 @@ async fn primary_circuit_open_routes_to_fallback() {
     // Reach into the registry and force-open the fallback's circuit (simulating
     // a primary that has already been opened). Since there's no primary here,
     // we verify directly that select_with_min_priority(1) picks the fallback.
-    let selected = context
-        .upstream_registry
-        .select_with_min_priority("test-model", None, None, None, 1);
+    let selected =
+        context
+            .upstream_registry
+            .select_with_min_priority("test-model", None, None, None, 1);
     assert_eq!(
         selected.unwrap().base_url(),
         fallback_url,

@@ -1,37 +1,33 @@
 use std::{
     pin::Pin,
-    sync::{
-        Arc,
-    },
+    sync::Arc,
     task::{Context, Poll},
     time::{Duration, Instant},
 };
 
 use axum::{
+    Json,
     body::Body,
     extract::{Request, State},
-    http::{header, HeaderValue, StatusCode, HeaderMap},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde::Serialize;
 use rand::Rng;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tower_http::trace::{MakeSpan, OnRequest, OnResponse, TraceLayer};
 use tower::{Layer, Service};
-use tracing::{error, field::Empty, info, info_span, warn, Span};
+use tower_http::trace::{MakeSpan, OnRequest, OnResponse, TraceLayer};
+use tracing::{Span, error, field::Empty, info, info_span, warn};
 
-use modelpointer_core::{
-    observability::{
-        metrics::{method_to_static_str, Metrics},
-    },
-};
 use crate::server::GatewayState;
+use modelpointer_core::observability::metrics::{Metrics, method_to_static_str};
 
 #[derive(Clone, Debug)]
 pub struct ApiKeyIdentity {
     pub key_id: String,
+    /// Populated from the auth record; retained for logging / future use.
+    #[allow(dead_code)]
     pub uid: String,
 }
 
@@ -93,7 +89,10 @@ pub async fn auth_middleware(
 }
 
 pub fn extract_api_key(headers: &HeaderMap) -> Option<&str> {
-    if let Some(value) = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()) {
+    if let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+    {
         if let Some(token) = value.strip_prefix("Bearer ") {
             if !token.is_empty() {
                 return Some(token);
@@ -106,7 +105,7 @@ pub fn extract_api_key(headers: &HeaderMap) -> Option<&str> {
 
 fn sha256_hex(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
-    format!("{:x}", digest)
+    format!("{digest:x}")
 }
 
 /// Alphanumeric characters for request ID generation (as bytes for O(1) indexing)
@@ -136,7 +135,7 @@ fn generate_request_id(path: &str) -> String {
         })
         .collect();
 
-    format!("{}{}", prefix, random_part)
+    format!("{prefix}{random_part}")
 }
 
 /// Extension type for storing request ID
@@ -276,7 +275,7 @@ impl<B> OnRequest<B> for RequestLogger {
     }
 }
 
-pub const HEADER_X_MG_ERROR_CODE: &str = "X-MG-Error-Code";
+pub const HEADER_X_MP_ERROR_CODE: &str = "X-MP-Error-Code";
 
 #[derive(Serialize)]
 struct ErrorResponse<'a> {
@@ -301,7 +300,7 @@ pub fn create_error(
 
     let mut headers = HeaderMap::with_capacity(1);
     headers.insert(
-        HEADER_X_MG_ERROR_CODE,
+        HEADER_X_MP_ERROR_CODE,
         HeaderValue::from_str(&code_str).unwrap(),
     );
 
@@ -328,11 +327,10 @@ fn status_code_to_str(status_code: StatusCode) -> &'static str {
 pub fn extract_error_code_from_response<B>(response: &Response<B>) -> &str {
     response
         .headers()
-        .get(HEADER_X_MG_ERROR_CODE)
+        .get(HEADER_X_MP_ERROR_CODE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
 }
-
 
 /// Custom on_response handler
 #[derive(Clone, Debug)]
@@ -476,7 +474,7 @@ mod tests {
 
     #[test]
     fn dynamic_id_prefixed_long_id() {
-        assert!(is_dynamic_id("resp_abc1234567890"));    // > 10 chars, has _
+        assert!(is_dynamic_id("resp_abc1234567890")); // > 10 chars, has _
         assert!(is_dynamic_id("chatcmpl_abc123456789")); // > 10 chars, has _
     }
 
@@ -502,9 +500,15 @@ mod tests {
 
     #[test]
     fn normalize_static_paths_unchanged() {
-        assert_eq!(normalize_path_for_metrics("/v1/chat/completions"), "/v1/chat/completions");
+        assert_eq!(
+            normalize_path_for_metrics("/v1/chat/completions"),
+            "/v1/chat/completions"
+        );
         assert_eq!(normalize_path_for_metrics("/v1/messages"), "/v1/messages");
-        assert_eq!(normalize_path_for_metrics("/v1/embeddings"), "/v1/embeddings");
+        assert_eq!(
+            normalize_path_for_metrics("/v1/embeddings"),
+            "/v1/embeddings"
+        );
         assert_eq!(normalize_path_for_metrics("/health"), "/health");
     }
 
@@ -542,7 +546,10 @@ mod tests {
     #[test]
     fn normalize_id_in_second_segment_not_replaced() {
         // "12345" is at segment index 1, only idx > 2 are replaced
-        assert_eq!(normalize_path_for_metrics("/12345/completions"), "/12345/completions");
+        assert_eq!(
+            normalize_path_for_metrics("/12345/completions"),
+            "/12345/completions"
+        );
     }
 
     #[test]

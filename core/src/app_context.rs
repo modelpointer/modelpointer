@@ -1,15 +1,9 @@
-use std::{
-    sync::{Arc},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use reqwest::Client;
 use tracing::debug;
 
-use crate::{
-    config::RouterConfig,
-    upstream::UpstreamRegistry,
-};
+use crate::{config::RouterConfig, upstream::UpstreamRegistry};
 
 #[derive(Clone)]
 pub struct AppContext {
@@ -19,9 +13,7 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    pub async fn with_config(
-        router_config: RouterConfig,
-    ) -> Result<Self, String> {
+    pub async fn with_config(router_config: RouterConfig) -> Result<Self, String> {
         let client = Self::build_http_client(&router_config)?;
         let upstream_registry = Arc::new(UpstreamRegistry::new());
 
@@ -68,7 +60,7 @@ impl AppContext {
         // Configure mTLS client identity if provided (certificates already loaded during config creation)
         if let Some(identity_pem) = &config.client_identity {
             let identity = reqwest::Identity::from_pem(identity_pem)
-                .map_err(|e| format!("Failed to create client identity: {}", e))?;
+                .map_err(|e| format!("Failed to create client identity: {e}"))?;
             client_builder = client_builder.identity(identity);
             debug!("mTLS client authentication enabled");
         }
@@ -76,7 +68,7 @@ impl AppContext {
         // Add CA certificates for verifying worker TLS (certificates already loaded during config creation)
         for ca_cert in &config.ca_certificates {
             let cert = reqwest::Certificate::from_pem(ca_cert)
-                .map_err(|e| format!("Failed to add CA certificate: {}", e))?;
+                .map_err(|e| format!("Failed to add CA certificate: {e}"))?;
             client_builder = client_builder.add_root_certificate(cert);
         }
         if !config.ca_certificates.is_empty() {
@@ -88,7 +80,7 @@ impl AppContext {
 
         let client = client_builder
             .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+            .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
         Ok(client)
     }

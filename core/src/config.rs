@@ -14,9 +14,13 @@ impl Default for TraceConfig {
     fn default() -> Self {
         Self {
             enable_trace: false,
-            otlp_traces_endpoint: std::env::var("OTLP_ENDPOINT").ok().unwrap_or_else(|| "http://localhost:4318/v1/traces".to_string()),
-            service_env: std::env::var("OTEL_SERVICE_ENV").unwrap_or_else(|_| "development".to_string()),
-            service_version: std::env::var("OTEL_SERVICE_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string()),
+            otlp_traces_endpoint: std::env::var("OTLP_ENDPOINT")
+                .ok()
+                .unwrap_or_else(|| "http://localhost:4318/v1/traces".to_string()),
+            service_env: std::env::var("OTEL_SERVICE_ENV")
+                .unwrap_or_else(|_| "development".to_string()),
+            service_version: std::env::var("OTEL_SERVICE_VERSION")
+                .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string()),
         }
     }
 }
@@ -61,6 +65,10 @@ pub struct ServerConfig {
     pub request_id_headers: Option<Vec<String>>,
     pub shutdown_grace_period_secs: u64,
     pub upstream_sync_interval_secs: u64,
+    /// How often (in seconds) each database-backed polling task performs a full
+    /// reload regardless of the config version, as a safety net against a lost
+    /// version bump. Set to 0 to disable and rely solely on version changes.
+    pub force_reload_interval_secs: u64,
     pub trace_config: Option<TraceConfig>,
     pub prometheus_config: Option<metrics::PrometheusConfig>,
     pub router_config: RouterConfig,
@@ -69,8 +77,6 @@ pub struct ServerConfig {
     pub cors_allowed_origins: Vec<String>,
     pub database: DatabaseConfig,
     pub auth_mode: AuthMode,
-    /// How often (in seconds) the cached auth mode reloads active keys from the database.
-    pub auth_cache_ttl_secs: u64,
     /// Path to a YAML route config file. When set, the gateway loads upstreams
     /// and routes from the file instead of connecting to a database.
     pub route_file: Option<String>,
@@ -98,6 +104,7 @@ impl Default for ServerConfig {
             request_id_headers: None,
             shutdown_grace_period_secs: 5,
             upstream_sync_interval_secs: 30,
+            force_reload_interval_secs: 3600,
             trace_config: Some(TraceConfig::default()),
             prometheus_config: Some(metrics::PrometheusConfig::default()),
             router_config: RouterConfig::default(),
@@ -105,7 +112,6 @@ impl Default for ServerConfig {
             cors_allowed_origins: Vec::new(),
             database: DatabaseConfig::default(),
             auth_mode: AuthMode::Cached,
-            auth_cache_ttl_secs: 60,
             route_file: None,
             auth_file: None,
             no_auth: false,

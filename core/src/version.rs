@@ -9,5 +9,5 @@ pub const VERSION: &str = build_env!(VERSION);
 
 /// Get simple version string (default for --version)
 pub fn get_version_string() -> String {
-    format!("{} {}", PROJECT_NAME, VERSION)
+    format!("{PROJECT_NAME} {VERSION}")
 }

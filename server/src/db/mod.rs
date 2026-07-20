@@ -5,8 +5,10 @@ use sqlx::{AnyPool, any::AnyPoolOptions};
 use modelpointer_core::config::DatabaseConfig;
 
 pub mod access_log_store;
+pub mod config_version;
 pub mod quota_store;
 pub mod route_store;
+pub(crate) use config_version::{ConfigResource, load_config_version};
 pub(crate) use quota_store::load_all_quota_overrides;
 pub use route_store::load_all_upstream_groups;
 

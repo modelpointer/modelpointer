@@ -9,18 +9,18 @@
 // Re-export UNKNOWN_MODEL_ID from protocols for use throughout core
 pub use crate::openai_protocol::UNKNOWN_MODEL_ID;
 
-pub mod retry;
-pub mod node;
-pub mod routing;
-pub mod registry;
 pub mod circuit_breaker;
+pub mod node;
+pub mod registry;
+pub mod retry;
+pub mod routing;
 
 // Re-export commonly used types for convenience
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-pub use retry::{is_retryable_status, RetryExecutor};
 pub use node::{
-    ApiCompatibility, Upstream, UpstreamBinding, UpstreamCredential,
-    UpstreamGroup, UpstreamNode, UpstreamProfile, RuntimeType, ProviderType,
+    ApiCompatibility, ProviderType, RuntimeType, Upstream, UpstreamBinding, UpstreamCredential,
+    UpstreamGroup, UpstreamNode, UpstreamProfile,
 };
-pub use routing::{RoutingStrategy, RoutingStrategyConfig};
 pub use registry::UpstreamRegistry;
+pub use retry::{RetryExecutor, is_retryable_status};
+pub use routing::{RoutingStrategy, RoutingStrategyConfig};
