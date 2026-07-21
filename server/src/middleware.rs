@@ -92,12 +92,10 @@ pub fn extract_api_key(headers: &HeaderMap) -> Option<&str> {
     if let Some(value) = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
+        && let Some(token) = value.strip_prefix("Bearer ")
+        && !token.is_empty()
     {
-        if let Some(token) = value.strip_prefix("Bearer ") {
-            if !token.is_empty() {
-                return Some(token);
-            }
-        }
+        return Some(token);
     }
 
     headers.get("x-api-key").and_then(|h| h.to_str().ok())
@@ -195,11 +193,11 @@ where
         let mut request_id = None;
 
         for header_name in headers.iter() {
-            if let Some(header_value) = req.headers().get(header_name) {
-                if let Ok(value) = header_value.to_str() {
-                    request_id = Some(value.to_string());
-                    break;
-                }
+            if let Some(header_value) = req.headers().get(header_name)
+                && let Ok(value) = header_value.to_str()
+            {
+                request_id = Some(value.to_string());
+                break;
             }
         }
 

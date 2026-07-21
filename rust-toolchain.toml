@@ -1,0 +1,6 @@
+# Pin the toolchain so local builds match CI exactly and avoid
+# "passes locally, fails in CI" drift from floating `stable`.
+# Bump deliberately when adopting a newer toolchain.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]

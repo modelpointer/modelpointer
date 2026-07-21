@@ -202,16 +202,16 @@ impl UpstreamRegistry {
     ) -> Option<Arc<dyn Upstream>> {
         // Try openai group first, then anthropic.
         for protocol in ["openai", "anthropic"] {
-            if let Some(group) = self.get_protocol_group(model_id, protocol) {
-                if let Some(u) = group.upstreams.iter().find_map(|b| {
+            if let Some(group) = self.get_protocol_group(model_id, protocol)
+                && let Some(u) = group.upstreams.iter().find_map(|b| {
                     if b.is_available() && b.provider_id() == provider_id {
                         Some(Arc::clone(b) as Arc<dyn Upstream>)
                     } else {
                         None
                     }
-                }) {
-                    return Some(u);
-                }
+                })
+            {
+                return Some(u);
             }
         }
         None

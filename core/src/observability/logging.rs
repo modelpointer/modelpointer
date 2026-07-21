@@ -121,11 +121,11 @@ pub fn init_logging(config: LoggingConfig, otel_layer_config: Option<TraceConfig
     if let Some(log_dir) = &config.log_dir {
         let log_dir = PathBuf::from(log_dir);
 
-        if !log_dir.exists() {
-            if let Err(e) = std::fs::create_dir_all(&log_dir) {
-                eprintln!("Failed to create log directory: {e}");
-                return LogGuard { _file_guard: None };
-            }
+        if !log_dir.exists()
+            && let Err(e) = std::fs::create_dir_all(&log_dir)
+        {
+            eprintln!("Failed to create log directory: {e}");
+            return LogGuard { _file_guard: None };
         }
 
         let file_appender =
@@ -150,15 +150,15 @@ pub fn init_logging(config: LoggingConfig, otel_layer_config: Option<TraceConfig
         layers.push(file_layer);
     }
 
-    if let Some(otel_layer_config) = &otel_layer_config {
-        if otel_layer_config.enable_trace {
-            match get_otel_layer() {
-                Ok(otel_layer) => {
-                    layers.push(otel_layer);
-                }
-                Err(e) => {
-                    eprintln!("Failed to initialize OpenTelemetry: {e}");
-                }
+    if let Some(otel_layer_config) = &otel_layer_config
+        && otel_layer_config.enable_trace
+    {
+        match get_otel_layer() {
+            Ok(otel_layer) => {
+                layers.push(otel_layer);
+            }
+            Err(e) => {
+                eprintln!("Failed to initialize OpenTelemetry: {e}");
             }
         }
     }

@@ -160,35 +160,31 @@ async fn check_rate_limits(
     // over-counting to the requester's own bucket for key_rpm rejections.
 
     // TPM (read-only — no counter side effects)
-    if let Some(limit) = key_tpm {
-        if let RateLimitDecision::Denied { retry_after_secs } =
+    if let Some(limit) = key_tpm
+        && let RateLimitDecision::Denied { retry_after_secs } =
             rl.check_tpm(&key_model_key, limit).await
-        {
-            return Err(rate_limit_response("key_tpm", limit, retry_after_secs));
-        }
+    {
+        return Err(rate_limit_response("key_tpm", limit, retry_after_secs));
     }
-    if let Some(limit) = model_tpm {
-        if let RateLimitDecision::Denied { retry_after_secs } =
+    if let Some(limit) = model_tpm
+        && let RateLimitDecision::Denied { retry_after_secs } =
             rl.check_tpm(&model_key, limit).await
-        {
-            return Err(rate_limit_response("model_tpm", limit, retry_after_secs));
-        }
+    {
+        return Err(rate_limit_response("model_tpm", limit, retry_after_secs));
     }
 
     // RPM (each call increments the counter — ordered from narrowest to broadest scope)
-    if let Some(limit) = key_rpm {
-        if let RateLimitDecision::Denied { retry_after_secs } =
+    if let Some(limit) = key_rpm
+        && let RateLimitDecision::Denied { retry_after_secs } =
             rl.check_rpm(&key_model_key, limit).await
-        {
-            return Err(rate_limit_response("key_rpm", limit, retry_after_secs));
-        }
+    {
+        return Err(rate_limit_response("key_rpm", limit, retry_after_secs));
     }
-    if let Some(limit) = model_rpm {
-        if let RateLimitDecision::Denied { retry_after_secs } =
+    if let Some(limit) = model_rpm
+        && let RateLimitDecision::Denied { retry_after_secs } =
             rl.check_rpm(&model_key, limit).await
-        {
-            return Err(rate_limit_response("model_rpm", limit, retry_after_secs));
-        }
+    {
+        return Err(rate_limit_response("model_rpm", limit, retry_after_secs));
     }
 
     // ── Primary-tier capacity (spill to fallback, no 429) ─────────────────────
@@ -208,17 +204,16 @@ async fn check_rate_limits(
     // causing capacity-based spillover to trigger sooner than strictly necessary.
     // Fixing this properly would require separating the "check" and "record"
     // phases of RPM counting, which is a deeper change deferred for now.
-    if let Some(limit) = primary_cap_rpm {
-        if let RateLimitDecision::Denied { .. } = rl.check_rpm(&primary_key, limit).await {
-            min_priority = 1;
-        }
+    if let Some(limit) = primary_cap_rpm
+        && let RateLimitDecision::Denied { .. } = rl.check_rpm(&primary_key, limit).await
+    {
+        min_priority = 1;
     }
-    if min_priority == 0 {
-        if let Some(limit) = primary_cap_tpm {
-            if let RateLimitDecision::Denied { .. } = rl.check_tpm(&primary_key, limit).await {
-                min_priority = 1;
-            }
-        }
+    if min_priority == 0
+        && let Some(limit) = primary_cap_tpm
+        && let RateLimitDecision::Denied { .. } = rl.check_tpm(&primary_key, limit).await
+    {
+        min_priority = 1;
     }
 
     let record_key_tpm = key_tpm.is_some();

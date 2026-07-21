@@ -239,10 +239,10 @@ pub fn inject_trace_context_http(headers: &mut HeaderMap) {
     impl opentelemetry::propagation::Injector for HeaderInjector<'_> {
         #[inline]
         fn set(&mut self, key: &str, value: String) {
-            if let Ok(header_name) = HeaderName::from_bytes(key.as_bytes()) {
-                if let Ok(header_value) = HeaderValue::from_str(&value) {
-                    self.0.insert(header_name, header_value);
-                }
+            if let Ok(header_name) = HeaderName::from_bytes(key.as_bytes())
+                && let Ok(header_value) = HeaderValue::from_str(&value)
+            {
+                self.0.insert(header_name, header_value);
             }
         }
     }

@@ -12,13 +12,13 @@ pub fn apply_provider_headers(
         ApiCompatibility::Anthropic => {
             // Anthropic requires x-api-key instead of Authorization
             // Extract Bearer token and use as x-api-key
-            if let Some(auth) = auth_header {
-                if let Ok(auth_str) = auth.to_str() {
-                    let api_key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
-                    req = req
-                        .header("x-api-key", api_key)
-                        .header("anthropic-version", "2023-06-01");
-                }
+            if let Some(auth) = auth_header
+                && let Ok(auth_str) = auth.to_str()
+            {
+                let api_key = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
+                req = req
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01");
             }
         }
         ApiCompatibility::OpenAi => {

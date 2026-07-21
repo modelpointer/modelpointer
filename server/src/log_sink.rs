@@ -138,11 +138,10 @@ async fn writer_task(
             }
 
             _ = partition_interval.tick() => {
-                if let DatabaseDialect::Postgres = dialect {
-                    if let Err(e) = access_log_store::ensure_pg_partitions(&pool, 3).await {
+                if let DatabaseDialect::Postgres = dialect
+                    && let Err(e) = access_log_store::ensure_pg_partitions(&pool, 3).await {
                         tracing::warn!("Failed to ensure access_log partitions: {e}");
                     }
-                }
             }
         }
     }

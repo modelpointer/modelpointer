@@ -282,28 +282,27 @@ fn extract_usage_from_sse_chunk(bytes: &[u8]) -> Option<TokenUsage> {
             if json_str.trim() == "[DONE]" {
                 continue;
             }
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                if let Some(usage) = v.get("usage") {
-                    let prompt = usage
-                        .get("prompt_tokens")
-                        .and_then(|t| t.as_u64())
-                        .unwrap_or(0) as u32;
-                    let completion = usage
-                        .get("completion_tokens")
-                        .and_then(|t| t.as_u64())
-                        .unwrap_or(0) as u32;
-                    let total = usage
-                        .get("total_tokens")
-                        .and_then(|t| t.as_u64())
-                        .unwrap_or((prompt + completion) as u64)
-                        as u32;
-                    if prompt > 0 || completion > 0 {
-                        found = Some(TokenUsage {
-                            prompt_tokens: prompt,
-                            completion_tokens: completion,
-                            total_tokens: total,
-                        });
-                    }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str)
+                && let Some(usage) = v.get("usage")
+            {
+                let prompt = usage
+                    .get("prompt_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0) as u32;
+                let completion = usage
+                    .get("completion_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0) as u32;
+                let total = usage
+                    .get("total_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or((prompt + completion) as u64) as u32;
+                if prompt > 0 || completion > 0 {
+                    found = Some(TokenUsage {
+                        prompt_tokens: prompt,
+                        completion_tokens: completion,
+                        total_tokens: total,
+                    });
                 }
             }
         }
@@ -321,24 +320,24 @@ fn extract_anthropic_usage_from_sse_chunk(bytes: &[u8]) -> Option<TokenUsage> {
             if json_str.trim() == "[DONE]" {
                 continue;
             }
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                if let Some(usage) = v.get("usage") {
-                    let prompt = usage
-                        .get("input_tokens")
-                        .and_then(|t| t.as_u64())
-                        .unwrap_or(0) as u32;
-                    let completion = usage
-                        .get("output_tokens")
-                        .and_then(|t| t.as_u64())
-                        .unwrap_or(0) as u32;
-                    let total = prompt + completion;
-                    if prompt > 0 || completion > 0 {
-                        found = Some(TokenUsage {
-                            prompt_tokens: prompt,
-                            completion_tokens: completion,
-                            total_tokens: total,
-                        });
-                    }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str)
+                && let Some(usage) = v.get("usage")
+            {
+                let prompt = usage
+                    .get("input_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0) as u32;
+                let completion = usage
+                    .get("output_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0) as u32;
+                let total = prompt + completion;
+                if prompt > 0 || completion > 0 {
+                    found = Some(TokenUsage {
+                        prompt_tokens: prompt,
+                        completion_tokens: completion,
+                        total_tokens: total,
+                    });
                 }
             }
         }
@@ -393,16 +392,15 @@ fn extract_finish_reason_from_sse_chunk(bytes: &[u8]) -> Option<String> {
             if json_str.trim() == "[DONE]" {
                 continue;
             }
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                if let Some(reason) = v
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str)
+                && let Some(reason) = v
                     .get("choices")
                     .and_then(|c| c.get(0))
                     .and_then(|c| c.get("finish_reason"))
                     .and_then(|r| r.as_str())
                     .filter(|s| !s.is_empty())
-                {
-                    return Some(reason.to_string());
-                }
+            {
+                return Some(reason.to_string());
             }
         }
     }
@@ -413,19 +411,16 @@ fn extract_finish_reason_from_sse_chunk(bytes: &[u8]) -> Option<String> {
 fn extract_anthropic_finish_reason_from_sse_chunk(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     for line in text.lines() {
-        if let Some(json_str) = line.strip_prefix("data:").map(str::trim_start) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                if v.get("type").and_then(|t| t.as_str()) == Some("message_delta") {
-                    if let Some(reason) = v
-                        .get("delta")
-                        .and_then(|d| d.get("stop_reason"))
-                        .and_then(|r| r.as_str())
-                        .filter(|s| !s.is_empty())
-                    {
-                        return Some(reason.to_string());
-                    }
-                }
-            }
+        if let Some(json_str) = line.strip_prefix("data:").map(str::trim_start)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str)
+            && v.get("type").and_then(|t| t.as_str()) == Some("message_delta")
+            && let Some(reason) = v
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(|r| r.as_str())
+                .filter(|s| !s.is_empty())
+        {
+            return Some(reason.to_string());
         }
     }
     None
@@ -1104,10 +1099,10 @@ impl RouterTrait for GatewayRouter {
                                     upstream.circuit_breaker().record_success();
                                     let usage =
                                         extract_usage_from_json(&body_bytes).unwrap_or_default();
-                                    if usage.total_tokens > 0 {
-                                        if let Some(ref rl) = attempt_rate_limit {
-                                            rl.record_tokens(&api_key_id, usage.total_tokens).await;
-                                        }
+                                    if usage.total_tokens > 0
+                                        && let Some(ref rl) = attempt_rate_limit
+                                    {
+                                        rl.record_tokens(&api_key_id, usage.total_tokens).await;
                                     }
                                     let finish_reason =
                                         extract_finish_reason_from_json(&body_bytes);
@@ -1208,10 +1203,10 @@ impl RouterTrait for GatewayRouter {
                                                 last_finish_reason = r;
                                             }
                                         });
-                                        if let Some(buf) = resp_buf.as_mut() {
-                                            if buf.len() < MAX_LOG_BODY_BYTES {
-                                                buf.extend_from_slice(&bytes);
-                                            }
+                                        if let Some(buf) = resp_buf.as_mut()
+                                            && buf.len() < MAX_LOG_BODY_BYTES
+                                        {
+                                            buf.extend_from_slice(&bytes);
                                         }
                                         if tx.send(Ok(bytes)).await.is_err() {
                                             break;
@@ -1244,10 +1239,10 @@ impl RouterTrait for GatewayRouter {
                                 }
                             }
                             // Stream completed — record tokens then emit access log
-                            if last_usage.total_tokens > 0 {
-                                if let Some(ref rl) = rate_limit_spawn {
-                                    rl.record_tokens(&api_key_id, last_usage.total_tokens).await;
-                                }
+                            if last_usage.total_tokens > 0
+                                && let Some(ref rl) = rate_limit_spawn
+                            {
+                                rl.record_tokens(&api_key_id, last_usage.total_tokens).await;
                             }
                             let total_ms = send_start.elapsed().as_millis() as u64;
                             let tpot_ms = if last_usage.completion_tokens > 0 && total_ms > ttft_ms
@@ -1499,10 +1494,10 @@ impl RouterTrait for GatewayRouter {
                                     // Anthropic usage fields differ: input_tokens / output_tokens
                                     let usage = extract_anthropic_usage_from_json(&body_bytes)
                                         .unwrap_or_default();
-                                    if usage.total_tokens > 0 {
-                                        if let Some(ref rl) = attempt_rate_limit {
-                                            rl.record_tokens(&api_key_id, usage.total_tokens).await;
-                                        }
+                                    if usage.total_tokens > 0
+                                        && let Some(ref rl) = attempt_rate_limit
+                                    {
+                                        rl.record_tokens(&api_key_id, usage.total_tokens).await;
                                     }
                                     let finish_reason =
                                         extract_anthropic_finish_reason_from_json(&body_bytes);
@@ -1603,10 +1598,10 @@ impl RouterTrait for GatewayRouter {
                                                 last_finish_reason = r;
                                             }
                                         });
-                                        if let Some(buf) = resp_buf.as_mut() {
-                                            if buf.len() < MAX_LOG_BODY_BYTES {
-                                                buf.extend_from_slice(&bytes);
-                                            }
+                                        if let Some(buf) = resp_buf.as_mut()
+                                            && buf.len() < MAX_LOG_BODY_BYTES
+                                        {
+                                            buf.extend_from_slice(&bytes);
                                         }
                                         if tx.send(Ok(bytes)).await.is_err() {
                                             break;
@@ -1637,10 +1632,10 @@ impl RouterTrait for GatewayRouter {
                                     cb_upstream.circuit_breaker().record_success();
                                 }
                             }
-                            if last_usage.total_tokens > 0 {
-                                if let Some(ref rl) = rate_limit_spawn {
-                                    rl.record_tokens(&api_key_id, last_usage.total_tokens).await;
-                                }
+                            if last_usage.total_tokens > 0
+                                && let Some(ref rl) = rate_limit_spawn
+                            {
+                                rl.record_tokens(&api_key_id, last_usage.total_tokens).await;
                             }
                             let total_ms = send_start.elapsed().as_millis() as u64;
                             let tpot_ms = if last_usage.completion_tokens > 0 && total_ms > ttft_ms
@@ -1880,10 +1875,10 @@ impl RouterTrait for GatewayRouter {
                                 // Embedding responses carry token usage in the same structure
                                 let usage =
                                     extract_usage_from_json(&body_bytes).unwrap_or_default();
-                                if usage.total_tokens > 0 {
-                                    if let Some(ref rl) = attempt_rate_limit {
-                                        rl.record_tokens(&api_key_id, usage.total_tokens).await;
-                                    }
+                                if usage.total_tokens > 0
+                                    && let Some(ref rl) = attempt_rate_limit
+                                {
+                                    rl.record_tokens(&api_key_id, usage.total_tokens).await;
                                 }
                                 let resp_body_str = if log_request_body {
                                     String::from_utf8_lossy(&body_bytes).into_owned()
@@ -2138,10 +2133,10 @@ impl RouterTrait for GatewayRouter {
                                     // Responses API uses input_tokens / output_tokens
                                     let usage = extract_responses_usage_from_json(&body_bytes)
                                         .unwrap_or_default();
-                                    if usage.total_tokens > 0 {
-                                        if let Some(ref rl) = attempt_rate_limit {
-                                            rl.record_tokens(&api_key_id, usage.total_tokens).await;
-                                        }
+                                    if usage.total_tokens > 0
+                                        && let Some(ref rl) = attempt_rate_limit
+                                    {
+                                        rl.record_tokens(&api_key_id, usage.total_tokens).await;
                                     }
                                     let finish_reason =
                                         extract_responses_status_from_json(&body_bytes);
@@ -2243,10 +2238,10 @@ impl RouterTrait for GatewayRouter {
                                                 last_finish_reason = st;
                                             }
                                         });
-                                        if let Some(buf) = resp_buf.as_mut() {
-                                            if buf.len() < MAX_LOG_BODY_BYTES {
-                                                buf.extend_from_slice(&bytes);
-                                            }
+                                        if let Some(buf) = resp_buf.as_mut()
+                                            && buf.len() < MAX_LOG_BODY_BYTES
+                                        {
+                                            buf.extend_from_slice(&bytes);
                                         }
                                         if tx.send(Ok(bytes)).await.is_err() {
                                             break;
@@ -2277,10 +2272,10 @@ impl RouterTrait for GatewayRouter {
                                     cb_upstream.circuit_breaker().record_success();
                                 }
                             }
-                            if last_usage.total_tokens > 0 {
-                                if let Some(ref rl) = rate_limit_spawn {
-                                    rl.record_tokens(&api_key_id, last_usage.total_tokens).await;
-                                }
+                            if last_usage.total_tokens > 0
+                                && let Some(ref rl) = rate_limit_spawn
+                            {
+                                rl.record_tokens(&api_key_id, last_usage.total_tokens).await;
                             }
                             let total_ms = send_start.elapsed().as_millis() as u64;
                             let tpot_ms = if last_usage.completion_tokens > 0 && total_ms > ttft_ms
